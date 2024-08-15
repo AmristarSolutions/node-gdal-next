@@ -2,6 +2,7 @@
 #include "gdal_field_defn.hpp"
 #include "gdal_common.hpp"
 #include "utils/field_types.hpp"
+#include "utils/field_sub_types.hpp"
 
 namespace node_gdal {
 
@@ -16,6 +17,7 @@ void FieldDefn::Initialize(Local<Object> target) {
 
   ATTR(lcons, "name", nameGetter, nameSetter);
   ATTR(lcons, "type", typeGetter, typeSetter);
+  ATTR(lcons, "subType", subTypeGetter, subTypeSetter);
   ATTR(lcons, "justification", justificationGetter, justificationSetter);
   ATTR(lcons, "width", widthGetter, widthSetter);
   ATTR(lcons, "precision", precisionGetter, precisionSetter);
@@ -48,6 +50,7 @@ FieldDefn::~FieldDefn() {
  * @class FieldDefn
  * @param {string} name Field name
  * @param {string} type Data type (see {@link Constants (OFT)|OFT}
+ * @param {string} subType Data sub type (see {@link Constants (OFST)|OFST}
  */
 NAN_METHOD(FieldDefn::New) {
 
@@ -66,17 +69,25 @@ NAN_METHOD(FieldDefn::New) {
   } else {
     std::string field_name("");
     std::string type_name("string");
+    std::string sub_type_name("none");
 
     NODE_ARG_STR(0, "field name", field_name);
     NODE_ARG_STR(1, "field type", type_name);
+    NODE_ARG_STR(2, "field sub type", sub_type_name);
 
     int field_type = getFieldTypeByName(type_name);
     if (field_type < 0) {
       Nan::ThrowError("Unrecognized field type");
       return;
     }
+    int field_sub_type = getFieldSubTypeByName(sub_type_name);
+    if (field_sub_type < 0) {
+      Nan::ThrowError("Unrecognized field sub type");
+      return;
+    }
 
     FieldDefn *def = new FieldDefn(new OGRFieldDefn(field_name.c_str(), static_cast<OGRFieldType>(field_type)));
+    def->this_->SetSubType(static_cast<OGRFieldSubType>(field_sub_type));
     def->owned_ = true;
     def->Wrap(info.This());
   }
@@ -140,6 +151,11 @@ NAN_GETTER(FieldDefn::nameGetter) {
 NAN_GETTER(FieldDefn::typeGetter) {
   FieldDefn *def = Nan::ObjectWrap::Unwrap<FieldDefn>(info.This());
   info.GetReturnValue().Set(SafeString::New(getFieldTypeName(def->this_->GetType())));
+}
+
+NAN_GETTER(FieldDefn::subTypeGetter) {
+  FieldDefn *def = Nan::ObjectWrap::Unwrap<FieldDefn>(info.This());
+  info.GetReturnValue().Set(SafeString::New(getFieldSubTypeName(def->this_->GetSubType())));
 }
 
 /**
@@ -223,6 +239,21 @@ NAN_SETTER(FieldDefn::typeSetter) {
     Nan::ThrowError("Unrecognized field type");
   } else {
     def->this_->SetType(OGRFieldType(type));
+  }
+}
+
+NAN_SETTER(FieldDefn::subTypeSetter) {
+  FieldDefn *def = Nan::ObjectWrap::Unwrap<FieldDefn>(info.This());
+  if (!value->IsString()) {
+    Nan::ThrowError("sub type must be a string");
+    return;
+  }
+  std::string name = *Nan::Utf8String(value);
+  int subType = getFieldSubTypeByName(name.c_str());
+  if (subType < 0) {
+    Nan::ThrowError("Unrecognized field sub type");
+  } else {
+    def->this_->SetSubType(OGRFieldSubType(subType));
   }
 }
 
