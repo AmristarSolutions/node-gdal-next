@@ -20,6 +20,7 @@
 #include <math.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "clock.h"
@@ -44,7 +45,7 @@
 static sInt4 DoubleToSInt4Clamp(double val) {
    if (val >= INT_MAX) return INT_MAX;
    if (val <= INT_MIN) return INT_MIN;
-   if (CPLIsNan(val)) return 0;
+   if (std::isnan(val)) return 0;
    return (sInt4)val;
 }
 
@@ -952,7 +953,7 @@ enum { GS4_ANALYSIS, GS4_ENSEMBLE, GS4_DERIVED, GS4_PROBABIL_PNT = 5,
  *   3/2003 AAT: Implemented multiple grid inventories in the same GRIB2
  *          message.
  *   4/2003 AAT: Started adding GRIB1 support
- *   6/2003 Matthew T. Kallio (matt@wunderground.com):
+ *   6/2003 Matthew T. Kallio (matt at wunderground.com):
  *          "wmo" dimension increased to WMO_HEADER_LEN + 1 (for '\0' char)
  *   7/2003 AAT: Added numMsg so we can quickly find the reference time for
  *          a file by inventorying just the first message.

@@ -9,26 +9,11 @@
  * Copyright (c) 2003, Frank Warmerdam
  * Copyright (c) 2007-2011, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "gdal_frmts.h"
+#include "gdal_priv.h"
 #include "ogr_spatialref.h"
 #include "rawdataset.h"
 #include <cmath>
@@ -47,7 +32,7 @@ class BTDataset final : public GDALPamDataset
     VSILFILE *fpImage;  // image data file.
 
     int bGeoTransformValid;
-    double adfGeoTransform[6];
+    GDALGeoTransform m_gt{};
 
     OGRSpatialReference m_oSRS{};
 
@@ -68,9 +53,10 @@ class BTDataset final : public GDALPamDataset
     {
         return m_oSRS.IsEmpty() ? nullptr : &m_oSRS;
     }
+
     CPLErr SetSpatialRef(const OGRSpatialReference *poSRS) override;
-    CPLErr GetGeoTransform(double *) override;
-    CPLErr SetGeoTransform(double *) override;
+    CPLErr GetGeoTransform(GDALGeoTransform &) const override;
+    CPLErr SetGeoTransform(const GDALGeoTransform &) override;
 
     CPLErr FlushCache(bool bAtClosing) override;
 
@@ -94,6 +80,7 @@ class BTRasterBand final : public GDALPamRasterBand
 
   public:
     BTRasterBand(GDALDataset *poDS, VSILFILE *fp, GDALDataType eType);
+
     ~BTRasterBand() override
     {
     }
@@ -138,8 +125,8 @@ CPLErr BTRasterBand::IReadBlock(int nBlockXOff, CPL_UNUSED int nBlockYOff,
     /*      Seek to profile.                                                */
     /* -------------------------------------------------------------------- */
     if (VSIFSeekL(fpImage,
-                  256 + nBlockXOff * nDataSize *
-                            static_cast<vsi_l_offset>(nRasterYSize),
+                  256 + static_cast<vsi_l_offset>(nBlockXOff) * nDataSize *
+                            nRasterYSize,
                   SEEK_SET) != 0)
     {
         CPLError(CE_Failure, CPLE_FileIO, ".bt Seek failed:%s",
@@ -213,8 +200,8 @@ CPLErr BTRasterBand::IWriteBlock(int nBlockXOff, CPL_UNUSED int nBlockYOff,
     /* -------------------------------------------------------------------- */
     /*      Allocate working buffer.                                        */
     /* -------------------------------------------------------------------- */
-    GByte *pabyWrkBlock =
-        static_cast<GByte *>(CPLMalloc(nDataSize * nRasterYSize));
+    GByte *pabyWrkBlock = static_cast<GByte *>(
+        CPLMalloc(static_cast<size_t>(nDataSize) * nRasterYSize));
 
     /* -------------------------------------------------------------------- */
     /*      Vertical flip data into work buffer, since GDAL expects         */
@@ -223,7 +210,8 @@ CPLErr BTRasterBand::IWriteBlock(int nBlockXOff, CPL_UNUSED int nBlockYOff,
     /* -------------------------------------------------------------------- */
     for (int i = 0; i < nRasterYSize; i++)
     {
-        memcpy(pabyWrkBlock + (nRasterYSize - i - 1) * nDataSize,
+        memcpy(pabyWrkBlock +
+                   static_cast<size_t>(nRasterYSize - i - 1) * nDataSize,
                reinterpret_cast<GByte *>(pImage) + i * nDataSize, nDataSize);
     }
 
@@ -363,12 +351,6 @@ BTDataset::BTDataset()
 {
     m_oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
-    adfGeoTransform[0] = 0.0;
-    adfGeoTransform[1] = 1.0;
-    adfGeoTransform[2] = 0.0;
-    adfGeoTransform[3] = 0.0;
-    adfGeoTransform[4] = 0.0;
-    adfGeoTransform[5] = 1.0;
     memset(abyHeader, 0, sizeof(abyHeader));
 }
 
@@ -417,10 +399,10 @@ CPLErr BTDataset::FlushCache(bool bAtClosing)
 /*                          GetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr BTDataset::GetGeoTransform(double *padfTransform)
+CPLErr BTDataset::GetGeoTransform(GDALGeoTransform &gt) const
 
 {
-    memcpy(padfTransform, adfGeoTransform, sizeof(double) * 6);
+    gt = m_gt;
 
     if (bGeoTransformValid)
         return CE_None;
@@ -432,13 +414,13 @@ CPLErr BTDataset::GetGeoTransform(double *padfTransform)
 /*                          SetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr BTDataset::SetGeoTransform(double *padfTransform)
+CPLErr BTDataset::SetGeoTransform(const GDALGeoTransform &gt)
 
 {
     CPLErr eErr = CE_None;
 
-    memcpy(adfGeoTransform, padfTransform, sizeof(double) * 6);
-    if (adfGeoTransform[2] != 0.0 || adfGeoTransform[4] != 0.0)
+    m_gt = gt;
+    if (gt[2] != 0.0 || gt[4] != 0.0)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
                  ".bt format does not support rotational coefficients "
@@ -449,10 +431,10 @@ CPLErr BTDataset::SetGeoTransform(double *padfTransform)
     /* -------------------------------------------------------------------- */
     /*      Compute bounds, and update header info.                         */
     /* -------------------------------------------------------------------- */
-    const double dfLeft = adfGeoTransform[0];
-    const double dfRight = dfLeft + adfGeoTransform[1] * nRasterXSize;
-    const double dfTop = adfGeoTransform[3];
-    const double dfBottom = dfTop + adfGeoTransform[5] * nRasterYSize;
+    const double dfLeft = m_gt[0];
+    const double dfRight = dfLeft + m_gt[1] * nRasterXSize;
+    const double dfTop = m_gt[3];
+    const double dfBottom = dfTop + m_gt[5] * nRasterYSize;
 
     memcpy(abyHeader + 28, &dfLeft, 8);
     memcpy(abyHeader + 36, &dfRight, 8);
@@ -545,8 +527,9 @@ CPLErr BTDataset::SetSpatialRef(const OGRSpatialReference *poSRS)
     m_oSRS.exportToWkt(&pszProjection, apszOptions);
     if (pszProjection)
     {
-        const char *pszPrjFile = CPLResetExtension(GetDescription(), "prj");
-        VSILFILE *fp = VSIFOpenL(pszPrjFile, "wt");
+        const std::string osPrjFile =
+            CPLResetExtensionSafe(GetDescription(), "prj");
+        VSILFILE *fp = VSIFOpenL(osPrjFile.c_str(), "wt");
         if (fp != nullptr)
         {
             CPL_IGNORE_RET_VAL(VSIFPrintfL(fp, "%s\n", pszProjection));
@@ -578,7 +561,8 @@ GDALDataset *BTDataset::Open(GDALOpenInfo *poOpenInfo)
     if (poOpenInfo->nHeaderBytes < 256 || poOpenInfo->fpL == nullptr)
         return nullptr;
 
-    if (!STARTS_WITH((const char *)poOpenInfo->pabyHeader, "binterr"))
+    if (!STARTS_WITH(reinterpret_cast<const char *>(poOpenInfo->pabyHeader),
+                     "binterr"))
         return nullptr;
 
     /* -------------------------------------------------------------------- */
@@ -652,9 +636,9 @@ GDALDataset *BTDataset::Open(GDALOpenInfo *poOpenInfo)
 
     if (poDS->nVersionCode >= 12 && poDS->abyHeader[60] != 0)
     {
-        const char *pszPrjFile =
-            CPLResetExtension(poOpenInfo->pszFilename, "prj");
-        VSILFILE *fp = VSIFOpenL(pszPrjFile, "rt");
+        const std::string osPrjFile =
+            CPLResetExtensionSafe(poOpenInfo->pszFilename, "prj");
+        VSILFILE *fp = VSIFOpenL(osPrjFile.c_str(), "rt");
         if (fp != nullptr)
         {
             const int nBufMax = 10000;
@@ -752,7 +736,7 @@ GDALDataset *BTDataset::Open(GDALOpenInfo *poOpenInfo)
     /*      Convert coordinate system back to WKT.                          */
     /* -------------------------------------------------------------------- */
     if (oSRS.GetRoot() != nullptr)
-        poDS->m_oSRS = oSRS;
+        poDS->m_oSRS = std::move(oSRS);
 
     /* -------------------------------------------------------------------- */
     /*      Get georeferencing bounds.                                      */
@@ -775,12 +759,12 @@ GDALDataset *BTDataset::Open(GDALOpenInfo *poOpenInfo)
         memcpy(&dfTop, poDS->abyHeader + 52, 8);
         CPL_LSBPTR64(&dfTop);
 
-        poDS->adfGeoTransform[0] = dfLeft;
-        poDS->adfGeoTransform[1] = (dfRight - dfLeft) / poDS->nRasterXSize;
-        poDS->adfGeoTransform[2] = 0.0;
-        poDS->adfGeoTransform[3] = dfTop;
-        poDS->adfGeoTransform[4] = 0.0;
-        poDS->adfGeoTransform[5] = (dfBottom - dfTop) / poDS->nRasterYSize;
+        poDS->m_gt[0] = dfLeft;
+        poDS->m_gt[1] = (dfRight - dfLeft) / poDS->nRasterXSize;
+        poDS->m_gt[2] = 0.0;
+        poDS->m_gt[3] = dfTop;
+        poDS->m_gt[4] = 0.0;
+        poDS->m_gt[5] = (dfBottom - dfTop) / poDS->nRasterYSize;
 
         poDS->bGeoTransformValid = TRUE;
     }
@@ -795,8 +779,8 @@ GDALDataset *BTDataset::Open(GDALOpenInfo *poOpenInfo)
     poDS->SetBand(1, new BTRasterBand(poDS, poDS->fpImage, eType));
 
 #ifdef notdef
-    poDS->bGeoTransformValid = GDALReadWorldFile(poOpenInfo->pszFilename,
-                                                 ".wld", poDS->adfGeoTransform);
+    poDS->bGeoTransformValid =
+        GDALReadWorldFile(poOpenInfo->pszFilename, ".wld", m_gt.data());
 #endif
 
     /* -------------------------------------------------------------------- */
@@ -871,7 +855,7 @@ GDALDataset *BTDataset::Create(const char *pszFilename, int nXSize, int nYSize,
     memcpy(abyHeader + 14, &nTemp, 4);
 
     GInt16 nShortTemp = static_cast<GInt16>(
-        CPL_LSBWORD16((GInt16)(GDALGetDataTypeSize(eType) / 8)));
+        CPL_LSBWORD16(static_cast<GInt16>(GDALGetDataTypeSizeBytes(eType))));
     memcpy(abyHeader + 18, &nShortTemp, 2);
 
     if (eType == GDT_Float32)
@@ -919,8 +903,8 @@ GDALDataset *BTDataset::Create(const char *pszFilename, int nXSize, int nYSize,
     /* -------------------------------------------------------------------- */
     if (VSIFWriteL(abyHeader, 256, 1, fp) != 1 ||
         VSIFSeekL(fp,
-                  (GDALGetDataTypeSize(eType) / 8) * nXSize *
-                          static_cast<vsi_l_offset>(nYSize) -
+                  static_cast<vsi_l_offset>(GDALGetDataTypeSizeBytes(eType)) *
+                          nXSize * nYSize -
                       1,
                   SEEK_CUR) != 0 ||
         VSIFWriteL(abyHeader + 255, 1, 1, fp) != 1)

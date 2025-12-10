@@ -3,8 +3,7 @@ import * as path from 'path'
 import * as gdal from 'gdal-async'
 
 describe('gdal.Polygon', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should be instantiable', () => {
     new gdal.Polygon()
@@ -80,8 +79,8 @@ describe('gdal.Polygon', () => {
           polygon.rings.add(ring1)
           const ring2 = new gdal.LineString()
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            polygon.rings.add(ring2 as any)
+            // @ts-expect-error voluntary error
+            polygon.rings.add(ring2)
           }, /must be a LinearRing/)
         })
       })
@@ -220,8 +219,7 @@ describe('gdal.Polygon', () => {
 })
 
 describe('gdal.MultiPolygon', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
   let multiPolygon: gdal.MultiPolygon
 
   beforeEach(() => {

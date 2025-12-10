@@ -8,23 +8,7 @@
  * Copyright (c) 2005, Frans van den Bergh <fvdbergh@csir.co.za>
  * Copyright (c) 2008-2009, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 #include "cpl_port.h"
 #include "cpl_error.h"
@@ -75,16 +59,16 @@ class MSGNDataset final : public GDALDataset
     int m_nHRVSplitLine = 0;
     int m_nHRVLowerShiftX = 0;
     int m_nHRVUpperShiftX = 0;
-    double adfGeoTransform[6];
+    GDALGeoTransform m_gt{};
     OGRSpatialReference m_oSRS{};
 
   public:
     MSGNDataset();
-    ~MSGNDataset();
+    ~MSGNDataset() override;
 
     static GDALDataset *Open(GDALOpenInfo *);
 
-    CPLErr GetGeoTransform(double *padfTransform) override;
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
     const OGRSpatialReference *GetSpatialRef() const override;
 };
 
@@ -122,10 +106,11 @@ class MSGNRasterBand final : public GDALRasterBand
     MSGNRasterBand(MSGNDataset *, int, open_mode_type mode, int orig_band_no,
                    int band_in_file);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual double GetMinimum(int *pbSuccess = nullptr) override;
-    virtual double GetMaximum(int *pbSuccess = nullptr) override;
-    virtual const char *GetDescription() const override
+    CPLErr IReadBlock(int, int, void *) override;
+    double GetMinimum(int *pbSuccess = nullptr) override;
+    double GetMaximum(int *pbSuccess = nullptr) override;
+
+    const char *GetDescription() const override
     {
         return band_description;
     }
@@ -183,7 +168,7 @@ CPLErr MSGNRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
                                   void *pImage)
 
 {
-    MSGNDataset *poGDS = (MSGNDataset *)poDS;
+    MSGNDataset *poGDS = cpl::down_cast<MSGNDataset *>(poDS);
 
     // invert y position
     const int i_nBlockYOff = poDS->GetRasterYSize() - 1 - nBlockYOff;
@@ -205,15 +190,17 @@ CPLErr MSGNRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
         data_offset =
             poGDS->msg_reader_core->get_f_data_offset() +
             static_cast<vsi_l_offset>(interline_spacing) * i_nBlockYOff +
-            (band_in_file - 1) * packet_size + (packet_size - data_length);
+            static_cast<vsi_l_offset>(band_in_file - 1) * packet_size +
+            (packet_size - data_length);
     }
     else
     {
-        data_offset = poGDS->msg_reader_core->get_f_data_offset() +
-                      static_cast<vsi_l_offset>(interline_spacing) *
-                          (int(i_nBlockYOff / 3) + 1) -
-                      packet_size * (3 - (i_nBlockYOff % 3)) +
-                      (packet_size - data_length);
+        data_offset =
+            poGDS->msg_reader_core->get_f_data_offset() +
+            static_cast<vsi_l_offset>(interline_spacing) *
+                (int(i_nBlockYOff / 3) + 1) -
+            static_cast<vsi_l_offset>(packet_size) * (3 - (i_nBlockYOff % 3)) +
+            (packet_size - data_length);
     }
 
     if (VSIFSeekL(poGDS->fp, data_offset, SEEK_SET) != 0)
@@ -222,7 +209,7 @@ CPLErr MSGNRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
     char *pszRecord = (char *)CPLMalloc(data_length);
     size_t nread = VSIFReadL(pszRecord, 1, data_length, poGDS->fp);
 
-    SUB_VISIRLINE *p = (SUB_VISIRLINE *)pszRecord;
+    SUB_VISIRLINE *p = reinterpret_cast<SUB_VISIRLINE *>(pszRecord);
     to_native(*p);
 
     if (p->lineValidity != 1 || poGDS->m_Shape != WHOLE_DISK)
@@ -369,7 +356,6 @@ double MSGNRasterBand::GetMaximum(int *pbSuccess)
 MSGNDataset::MSGNDataset() : fp(nullptr), msg_reader_core(nullptr)
 {
     m_oSRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
-    std::fill_n(adfGeoTransform, CPL_ARRAYSIZE(adfGeoTransform), 0);
 }
 
 /************************************************************************/
@@ -392,13 +378,10 @@ MSGNDataset::~MSGNDataset()
 /*                          GetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr MSGNDataset::GetGeoTransform(double *padfTransform)
+CPLErr MSGNDataset::GetGeoTransform(GDALGeoTransform &gt) const
 
 {
-    for (int i = 0; i < 6; i++)
-    {
-        padfTransform[i] = adfGeoTransform[i];
-    }
+    gt = m_gt;
 
     return CE_None;
 }
@@ -428,14 +411,14 @@ GDALDataset *MSGNDataset::Open(GDALOpenInfo *poOpenInfo)
     {
         if (STARTS_WITH_CI(poOpenInfo->pszFilename, "HRV:"))
         {
-            poOpenInfoToFree = cpl::make_unique<GDALOpenInfo>(
+            poOpenInfoToFree = std::make_unique<GDALOpenInfo>(
                 &poOpenInfo->pszFilename[4], poOpenInfo->eAccess);
             open_info = poOpenInfoToFree.get();
             open_mode = MODE_HRV;
         }
         else if (STARTS_WITH_CI(poOpenInfo->pszFilename, "RAD:"))
         {
-            poOpenInfoToFree = cpl::make_unique<GDALOpenInfo>(
+            poOpenInfoToFree = std::make_unique<GDALOpenInfo>(
                 &poOpenInfo->pszFilename[4], poOpenInfo->eAccess);
             open_info = poOpenInfoToFree.get();
             open_mode = MODE_RAD;
@@ -464,9 +447,7 @@ GDALDataset *MSGNDataset::Open(GDALOpenInfo *poOpenInfo)
     /* -------------------------------------------------------------------- */
     if (poOpenInfo->eAccess == GA_Update)
     {
-        CPLError(CE_Failure, CPLE_NotSupported,
-                 "The MSGN driver does not support update access to existing"
-                 " datasets.\n");
+        ReportUpdateNotSupportedByDriver("MSGN");
         return nullptr;
     }
 
@@ -479,7 +460,7 @@ GDALDataset *MSGNDataset::Open(GDALOpenInfo *poOpenInfo)
         return nullptr;
     }
 
-    auto poDS = cpl::make_unique<MSGNDataset>();
+    auto poDS = std::make_unique<MSGNDataset>();
 
     poDS->m_open_mode = open_mode;
     poDS->fp = fp;
@@ -742,13 +723,13 @@ GDALDataset *MSGNDataset::Open(GDALOpenInfo *poOpenInfo)
            CGMS/DOC/12/0017 section 4.4.2
         */
 
-        poDS->adfGeoTransform[0] = -origin_x;
-        poDS->adfGeoTransform[1] = pixel_gsd_x;
-        poDS->adfGeoTransform[2] = 0.0;
+        poDS->m_gt[0] = -origin_x;
+        poDS->m_gt[1] = pixel_gsd_x;
+        poDS->m_gt[2] = 0.0;
 
-        poDS->adfGeoTransform[3] = -origin_y;
-        poDS->adfGeoTransform[4] = 0.0;
-        poDS->adfGeoTransform[5] = -pixel_gsd_y;
+        poDS->m_gt[3] = -origin_y;
+        poDS->m_gt[4] = 0.0;
+        poDS->m_gt[5] = -pixel_gsd_y;
 
         poDS->m_oSRS.SetProjCS("Geostationary projection (MSG)");
 

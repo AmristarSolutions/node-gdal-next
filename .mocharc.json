@@ -1,7 +1,7 @@
 {
   "spec": "test/*.test.ts",
   "require": [
-    "ts-node/register",
+    "tsx",
     "tsconfig-paths/register",
     "test/_common.ts",
     "test/_hooks.ts"

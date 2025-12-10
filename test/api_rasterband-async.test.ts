@@ -1,14 +1,9 @@
-import * as chaiAsPromised from 'chai-as-promised'
-import * as chai from 'chai'
-const assert = chai.assert
-import * as gdal from 'gdal-async'
+import { assert } from 'chai'
+import gdal from 'gdal-async'
 import * as semver from 'semver'
 
-chai.use(chaiAsPromised)
-
 describe('gdal.RasterBandAsync', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should not be instantiable', () => {
     assert.throws(() => {
@@ -35,8 +30,8 @@ describe('gdal.RasterBandAsync', () => {
             (e, ds) => {
               const band = ds.bands.get(1)
               assert.throws(() => {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                (band as any).description = 'test'
+                // @ts-expect-error voluntary error
+                band.description = 'test'
               })
             })
         })
@@ -94,8 +89,7 @@ describe('gdal.RasterBandAsync', () => {
       describe('readAsync() w/cb', () => {
         it('should not crash if the dataset is immediately closed', () => {
           // This test has good chances of triggering the event loop warning
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (gdal as any).eventLoopWarning = false
+          gdal.eventLoopWarning = false
           for (let i = 0; i < 20; i++) {
             const ds = gdal.open(`${__dirname}/data/sample.tif`)
             const band = ds.bands.get(1)
@@ -108,15 +102,14 @@ describe('gdal.RasterBandAsync', () => {
             band.pixels.readAsync(190, 290, w, h, undefined, undefined, () => undefined)
             ds.close()
           }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (gdal as any).eventLoopWarning = true
+          gdal.eventLoopWarning = true
         })
         it('should return a TypedArray', () => {
           gdal.openAsync(`${__dirname}/data/sample.tif`, (e, ds) => {
             const band = ds.bands.get(1)
             const w = 20
             const h = 30
-            band.pixels.readAsync(190, 290, w, h, undefined, undefined, (e, data) => {
+            band.pixels.readAsync<Uint8Array>(190, 290, w, h, undefined, undefined, (e, data) => {
               assert.instanceOf(data, Uint8Array)
               assert.equal(data.length, w * h)
               assert.equal(data[10 * 20 + 10], 10)
@@ -218,7 +211,7 @@ describe('gdal.RasterBandAsync', () => {
             it("should create new array with given dimensions if array isn't given", () => {
               const ds = gdal.open(`${__dirname}/data/sample.tif`)
               const band = ds.bands.get(1)
-              const data = band.pixels.readAsync(0, 0, 20, 30, undefined, {
+              const data = band.pixels.readAsync<Uint8Array>(0, 0, 20, 30, undefined, {
                 buffer_width: 10,
                 buffer_height: 15
               })
@@ -318,8 +311,8 @@ describe('gdal.RasterBandAsync', () => {
             it('should support default resampling', () => {
               let i
 
-              const q1 = band_stripes.pixels.readAsync(0, 0, w, h, undefined, { buffer_width: w, buffer_height: h })
-              const q2 = band_solid.pixels.readAsync(0, 0, w, h, undefined, { buffer_width: w, buffer_height: h })
+              const q1 = band_stripes.pixels.readAsync<Uint8Array>(0, 0, w, h, undefined, { buffer_width: w, buffer_height: h })
+              const q2 = band_solid.pixels.readAsync<Uint8Array>(0, 0, w, h, undefined, { buffer_width: w, buffer_height: h })
               return assert.isFulfilled(Promise.all([ q1, q2 ]).then((data) => {
                 const [ data1, data2 ] = data
                 assert.equal(data1.length, w*h)
@@ -330,8 +323,8 @@ describe('gdal.RasterBandAsync', () => {
             it('should support non-standard resampling', () => {
               let i
 
-              const q1 = band_stripes.pixels.readAsync(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Average })
-              const q2 = band_stripes.pixels.readAsync(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Bilinear })
+              const q1 = band_stripes.pixels.readAsync<Uint8Array>(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Average })
+              const q2 = band_stripes.pixels.readAsync<Uint8Array>(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Bilinear })
               return assert.isFulfilled(Promise.all([ q1, q2 ]).then((data) => {
                 const [ data1, data2 ] = data
                 assert.equal(data1.length, w*h / 16)
@@ -347,7 +340,7 @@ describe('gdal.RasterBandAsync', () => {
             // and even in this we should be ready to retry if the host is very busy
             // or it has somehow cached the resource
             it('should call the progress callback when one is provided', function () {
-              this.retries(3)
+              this.retries(10)
 
               const ds = gdal.open(`/vsicurl/https://s3.amazonaws.com/elevation-tiles-prod/geotiff/1/1/1.tif`)
               const band = ds.bands.get(1)
@@ -418,7 +411,7 @@ describe('gdal.RasterBandAsync', () => {
 
             const dataq = band.pixels.readBlockAsync(0, 0)
             return assert.isFulfilled(dataq.then((data) => {
-              assert.instanceOf(data, Uint8Array),
+              assert.instanceOf(data, Uint8Array)
               assert.equal(data.length, band.blockSize.x * band.blockSize.y)
             }))
           })
@@ -528,6 +521,50 @@ describe('gdal.RasterBandAsync', () => {
             assert.deepEqual(size2, { x: 984, y: 4 })
           }))
         })
+      })
+    })
+    describe('threadSafe', () => {
+      it('should support opening in threadsafe mode with GDAL >= 3.10', () => {
+        const ds = gdal.open(`${__dirname}/data/sample.tif`, 'r')
+        assert.isFalse(ds.threadSafe)
+        if (semver.gte(gdal.version, '3.10.0')) {
+          const ds = gdal.open(`${__dirname}/data/sample.tif`, 'rt')
+          assert.isTrue(ds.threadSafe)
+        } else {
+          assert.throws(() => {
+            gdal.open(`${__dirname}/data/sample.tif`, 'rt')
+          }, /requires GDAL 3.10/)
+        }
+      })
+      it('should disallow opening in threadsafe writing mode with GDAL >= 3.10', () => {
+        const file = `/vsimem/write_threadSafe_test.${String(
+          Math.random()
+        ).substring(2)}.tmp.tif`
+        assert.throws(() => {
+          gdal.open(file, 'r+t', 'GTiff', 64, 64, 1, gdal.GDT_Byte)
+        })
+      })
+      it('should support reading in threadsafe mode with GDAL >= 3.10', function () {
+        if (semver.gte(gdal.version, '3.10.0')) {
+          const ds = gdal.open(`${__dirname}/data/sample.tif`, 'rt')
+          assert.isTrue(ds.threadSafe)
+          const data: Promise<Uint8Array>[] = []
+          for (let x = 0; x < 5; x++) {
+            for (let y = 0; y < 5; y++) {
+              const array = ds.bands.getAsync(1).then((b) => b.pixels.readAsync<Uint8Array>(x * 10, y * 10, 10, 10))
+              data.push(array)
+              // Synchronously accessing datasets on which async operations are running
+              // should produce a console warning about blocking the event loop
+              // if the dataset is actually locked
+              assert.isNumber(ds.rasterSize.x)
+              assert.instanceOf(ds.bands.get(1).pixels.read<Uint8Array>(x * 10, y * 10, 10, 10), Uint8Array)
+            }
+          }
+          assert.lengthOf(data, 25)
+          return Promise.all(data)
+            .then((arrays) => arrays.forEach((a) => void assert.instanceOf(a, Uint8Array)))
+        }
+        this.skip()
       })
     })
     describe('flushAsync()', () => {

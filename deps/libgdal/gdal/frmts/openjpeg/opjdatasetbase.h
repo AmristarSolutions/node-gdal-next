@@ -7,23 +7,7 @@
  * Copyright (c) 2015, European Union (European Environment Agency)
  * Copyright (c) 2023, Grok Image Compression Inc.
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 #pragma once
 
@@ -121,7 +105,7 @@ static void JP2OpenJPEG_ErrorCallback(const char *pszMsg,
 
 static size_t JP2Dataset_Read(void *pBuffer, size_t nBytes, void *pUserData)
 {
-    JP2File *psJP2File = (JP2File *)pUserData;
+    JP2File *psJP2File = static_cast<JP2File *>(pUserData);
     size_t nRet =
         static_cast<size_t>(VSIFReadL(pBuffer, 1, nBytes, psJP2File->fp_));
 #ifdef DEBUG_IO
@@ -141,7 +125,7 @@ static size_t JP2Dataset_Read(void *pBuffer, size_t nBytes, void *pUserData)
 
 static size_t JP2Dataset_Write(void *pBuffer, size_t nBytes, void *pUserData)
 {
-    JP2File *psJP2File = (JP2File *)pUserData;
+    JP2File *psJP2File = static_cast<JP2File *>(pUserData);
     size_t nRet =
         static_cast<size_t>(VSIFWriteL(pBuffer, 1, nBytes, psJP2File->fp_));
 #ifdef DEBUG_IO
@@ -160,7 +144,7 @@ static size_t JP2Dataset_Write(void *pBuffer, size_t nBytes, void *pUserData)
 
 static OPJ_BOOL JP2Dataset_Seek(int64_t nBytes, void *pUserData)
 {
-    JP2File *psJP2File = (JP2File *)pUserData;
+    JP2File *psJP2File = static_cast<JP2File *>(pUserData);
 #ifdef DEBUG_IO
     CPLDebug(OPJCodecWrapper::debugId(), "JP2Dataset_Seek(" CPL_FRMT_GUIB ")",
              static_cast<GUIntBig>(nBytes));
@@ -175,7 +159,7 @@ static OPJ_BOOL JP2Dataset_Seek(int64_t nBytes, void *pUserData)
 
 static int64_t JP2Dataset_Skip(int64_t nBytes, void *pUserData)
 {
-    JP2File *psJP2File = (JP2File *)pUserData;
+    JP2File *psJP2File = static_cast<JP2File *>(pUserData);
     vsi_l_offset nOffset = VSIFTellL(psJP2File->fp_);
     nOffset += nBytes;
 #ifdef DEBUG_IO
@@ -195,11 +179,8 @@ static int64_t JP2Dataset_Skip(int64_t nBytes, void *pUserData)
 
 struct OPJCodecWrapper
 {
-    OPJCodecWrapper(void)
-        : pCodec(nullptr), pStream(nullptr), psImage(nullptr),
-          pasBandParams(nullptr), psJP2File(nullptr)
-    {
-    }
+    OPJCodecWrapper() = default;
+
     explicit OPJCodecWrapper(OPJCodecWrapper *rhs)
         : pCodec(rhs->pCodec), pStream(rhs->pStream), psImage(rhs->psImage),
           pasBandParams(rhs->pasBandParams), psJP2File(rhs->psJP2File)
@@ -210,6 +191,7 @@ struct OPJCodecWrapper
         rhs->pasBandParams = nullptr;
         rhs->psJP2File = nullptr;
     }
+
     ~OPJCodecWrapper(void)
     {
         free();
@@ -221,6 +203,7 @@ struct OPJCodecWrapper
         psJP2File->fp_ = fp;
         psJP2File->nBaseOffset = offset;
     }
+
     void open(VSILFILE *fp)
     {
         psJP2File = static_cast<JP2File *>(CPLMalloc(sizeof(JP2File)));
@@ -273,6 +256,7 @@ struct OPJCodecWrapper
 
         return osComment + opj_version();
     }
+
     void updateStrict(CPL_UNUSED bool strict)
     {
         // prevent linter from treating this as potential static method
@@ -283,18 +267,6 @@ struct OPJCodecWrapper
 #endif
     }
 
-    /* Depending on the way OpenJPEG <= r2950 is built, YCC with 4 bands might
-  * work on Debug mode, but this relies on unreliable stack buffer overflows,
-  * so better err on the safe side */
-    static bool supportsYCC_4Band(void)
-    {
-#if !(IS_OPENJPEG_OR_LATER(2, 2, 0))
-        return false;
-#else
-        return true;
-#endif
-    }
-
     static const char *debugId(void)
     {
         return "OPENJPEG";
@@ -302,8 +274,8 @@ struct OPJCodecWrapper
 
     void allocComponentParams(int nBands)
     {
-        pasBandParams = (jp2_image_comp_param *)CPLMalloc(
-            nBands * sizeof(jp2_image_comp_param));
+        pasBandParams = static_cast<jp2_image_comp_param *>(
+            CPLMalloc(nBands * sizeof(jp2_image_comp_param)));
     }
 
     void free(void)
@@ -341,8 +313,8 @@ struct OPJCodecWrapper
     {
 
         OPJCodecWrapper codec;
-        pCodec = opj_create_decompress(
-            (OPJ_CODEC_FORMAT)OPJCodecWrapper::cvtenum(JP2_CODEC_J2K));
+        pCodec = opj_create_decompress(static_cast<OPJ_CODEC_FORMAT>(
+            OPJCodecWrapper::cvtenum(JP2_CODEC_J2K)));
         if (pCodec == nullptr)
             return false;
 
@@ -358,12 +330,10 @@ struct OPJCodecWrapper
             return false;
         }
 
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (getenv("OPJ_NUM_THREADS") == nullptr)
         {
             opj_codec_set_threads(pCodec, numThreads);
         }
-#endif
 
         pStream = CreateReadStream(psJP2File, nCodeStreamLength);
         if (pStream == nullptr)
@@ -420,7 +390,7 @@ struct OPJCodecWrapper
         // CPLDebug(OPJCodecWrapper::debugId(), "psImage->color_space = %d", psImage->color_space);
         CPLDebug(OPJCodecWrapper::debugId(), "numResolutions = %d",
                  *numResolutions);
-        for (int i = 0; i < (int)psImage->numcomps; i++)
+        for (int i = 0; i < static_cast<int>(psImage->numcomps); i++)
         {
             CPLDebug(OPJCodecWrapper::debugId(), "psImage->comps[%d].dx = %u",
                      i, psImage->comps[i].dx);
@@ -472,7 +442,8 @@ struct OPJCodecWrapper
                       int nNumResolutions, JP2_PROG_ORDER eProgOrder, int bYCC,
                       int nCblockW, int nCblockH, int bYCBCR420, int bProfile1,
                       int nBands, int nXSize, int nYSize,
-                      JP2_COLOR_SPACE eColorSpace, CPL_UNUSED int numThreads)
+                      JP2_COLOR_SPACE eColorSpace,
+                      [[maybe_unused]] int numThreads)
     {
         int bSOP =
             CPLTestBool(CSLFetchNameValueDef(papszOptions, "SOP", "FALSE"));
@@ -486,9 +457,9 @@ struct OPJCodecWrapper
         if (bEPH)
             compressParams.csty |= 0x04;
         compressParams.cp_disto_alloc = 1;
-        compressParams.tcp_numlayers = (int)adfRates.size();
-        for (int i = 0; i < (int)adfRates.size(); i++)
-            compressParams.tcp_rates[i] = (float)adfRates[i];
+        compressParams.tcp_numlayers = static_cast<int>(adfRates.size());
+        for (size_t i = 0; i < adfRates.size(); i++)
+            compressParams.tcp_rates[i] = static_cast<float>(adfRates[i]);
         compressParams.cp_tx0 = 0;
         compressParams.cp_ty0 = 0;
         compressParams.tile_size_on = TRUE;
@@ -496,7 +467,7 @@ struct OPJCodecWrapper
         compressParams.cp_tdy = nBlockYSize;
         compressParams.irreversible = bIsIrreversible;
         compressParams.numresolution = nNumResolutions;
-        compressParams.prog_order = (OPJ_PROG_ORDER)eProgOrder;
+        compressParams.prog_order = static_cast<OPJ_PROG_ORDER>(eProgOrder);
         compressParams.tcp_mct = static_cast<char>(bYCC);
         compressParams.cblockw_init = nCblockW;
         compressParams.cblockh_init = nCblockH;
@@ -523,8 +494,6 @@ struct OPJCodecWrapper
             compressParams.cp_comment = &osComment[0];
         }
 
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
-        // Was buggy before for some of the options
         const char *pszCodeBlockStyle =
             CSLFetchNameValue(papszOptions, "CODEBLOCK_STYLE");
         if (pszCodeBlockStyle)
@@ -585,7 +554,6 @@ struct OPJCodecWrapper
                 CSLDestroy(papszTokens);
             }
         }
-#endif
 
         /* Add precincts */
         const char *pszPrecincts = CSLFetchNameValueDef(
@@ -646,8 +614,8 @@ struct OPJCodecWrapper
 
         /* Always ask OpenJPEG to do codestream only. We will take care */
         /* of JP2 boxes */
-        pCodec = opj_create_compress(
-            (OPJ_CODEC_FORMAT)OPJCodecWrapper::cvtenum(JP2_CODEC_J2K));
+        pCodec = opj_create_compress(static_cast<OPJ_CODEC_FORMAT>(
+            OPJCodecWrapper::cvtenum(JP2_CODEC_J2K)));
         if (pCodec == nullptr)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
@@ -659,8 +627,8 @@ struct OPJCodecWrapper
         opj_set_warning_handler(pCodec, JP2OpenJPEG_WarningCallback, nullptr);
         opj_set_error_handler(pCodec, JP2OpenJPEG_ErrorCallback, nullptr);
 
-        psImage = opj_image_tile_create(nBands, pasBandParams,
-                                        (OPJ_COLOR_SPACE)eColorSpace);
+        psImage = opj_image_tile_create(
+            nBands, pasBandParams, static_cast<OPJ_COLOR_SPACE>(eColorSpace));
 
         if (psImage == nullptr)
         {
@@ -674,7 +642,7 @@ struct OPJCodecWrapper
         psImage->y0 = 0;
         psImage->x1 = nXSize;
         psImage->y1 = nYSize;
-        psImage->color_space = (OPJ_COLOR_SPACE)eColorSpace;
+        psImage->color_space = static_cast<OPJ_COLOR_SPACE>(eColorSpace);
         psImage->numcomps = nBands;
 
         if (!opj_setup_encoder(pCodec, &compressParams, psImage))
@@ -765,11 +733,14 @@ struct OPJCodecWrapper
         return pStream;
     }
 
-    jp2_codec *pCodec;
-    jp2_stream *pStream;
-    jp2_image *psImage;
-    jp2_image_comp_param *pasBandParams;
-    JP2File *psJP2File;
+    jp2_codec *pCodec = nullptr;
+    jp2_stream *pStream = nullptr;
+    jp2_image *psImage = nullptr;
+    jp2_image_comp_param *pasBandParams = nullptr;
+    JP2File *psJP2File = nullptr;
+
+    OPJCodecWrapper(const OPJCodecWrapper &) = delete;
+    OPJCodecWrapper &operator=(const OPJCodecWrapper &) = delete;
 };
 
 /************************************************************************/
@@ -781,11 +752,11 @@ struct OPJCodecWrapper
 struct JP2OPJDatasetBase : public JP2DatasetBase
 {
     int eColorSpace = OPJCodecWrapper::cvtenum(JP2_CLRSPC_UNKNOWN);
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
     OPJCodecWrapper *m_codec = nullptr;
-#endif
     int *m_pnLastLevel = nullptr;
     bool m_bStrict = true;
+
+    ~JP2OPJDatasetBase() override;
 
     void init(void)
     {
@@ -812,7 +783,6 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
             return CE_Failure;
         }
 
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (m_codec && CPLTestBool(CPLGetConfigOption(
                            "USE_OPENJPEG_SINGLE_TILE_OPTIM", "YES")))
         {
@@ -832,10 +802,9 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
         *m_pnLastLevel = iLevel;
 
         if (codec->pCodec == nullptr)
-#endif
         {
-            codec->pCodec = opj_create_decompress(
-                (OPJ_CODEC_FORMAT)OPJCodecWrapper::cvtenum(JP2_CODEC_J2K));
+            codec->pCodec = opj_create_decompress(static_cast<OPJ_CODEC_FORMAT>(
+                OPJCodecWrapper::cvtenum(JP2_CODEC_J2K)));
             if (codec->pCodec == nullptr)
             {
                 CPLError(CE_Failure, CPLE_AppDefined,
@@ -864,14 +833,12 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
                 opj_decoder_set_strict_mode(codec->pCodec, false);
             }
 #endif
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
             if (m_codec && m_codec->psJP2File)
             {
                 codec->pStream = OPJCodecWrapper::CreateReadStream(
                     m_codec->psJP2File, nCodeStreamLength);
             }
             else
-#endif
             {
                 codec->open(fpIn, nCodeStreamStart);
                 codec->pStream = OPJCodecWrapper::CreateReadStream(
@@ -884,7 +851,6 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
                 return CE_Failure;
             }
 
-#if IS_OPENJPEG_OR_LATER(2, 2, 0)
             if (getenv("OPJ_NUM_THREADS") == nullptr)
             {
                 if (m_nBlocksToLoad <= 1)
@@ -893,7 +859,7 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
                     opj_codec_set_threads(codec->pCodec,
                                           GetNumThreads() / m_nBlocksToLoad);
             }
-#endif
+
             if (!opj_read_header(codec->pStream, codec->pCodec,
                                  &codec->psImage))
             {
@@ -975,10 +941,8 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
     {
         // prevent linter from treating this as potential static method
         (void)this;
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (m_codec && rhs)
             m_codec->transfer(rhs->m_codec);
-#endif
     }
 
     void cacheNew(CPL_UNUSED OPJCodecWrapper *codec)
@@ -987,10 +951,8 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
         (void)this;
         if (!codec)
             return;
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (m_codec)
             m_codec = new OPJCodecWrapper(codec);
-#endif
     }
 
     void cache(CPL_UNUSED OPJCodecWrapper *codec)
@@ -1000,14 +962,12 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
         if (!codec)
             return;
 
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (m_codec && CPLTestBool(CPLGetConfigOption(
                            "USE_OPENJPEG_SINGLE_TILE_OPTIM", "YES")))
         {
             codec->transfer(m_codec);
         }
         else
-#endif
         {
             codec->cleanUpDecompress();
         }
@@ -1017,13 +977,11 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
     {
         // prevent linter from treating this as potential static method
         (void)this;
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (bSingleTiled && bUseSetDecodeArea)
         {
             // nothing
         }
         else
-#endif
         {
             if (codec)
                 codec->free();
@@ -1034,7 +992,6 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
     {
         // prevent linter from treating this as potential static method
         (void)this;
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
         if (iLevel == 0)
         {
             if (m_codec)
@@ -1042,169 +999,5 @@ struct JP2OPJDatasetBase : public JP2DatasetBase
             delete m_pnLastLevel;
             m_pnLastLevel = nullptr;
         }
-#endif
-    }
-
-    static void setMetaData(GDALDriver *poDriver)
-    {
-        poDriver->SetMetadataItem(
-            GDAL_DMD_OPENOPTIONLIST,
-            "<OpenOptionList>"
-#if IS_OPENJPEG_OR_LATER(2, 5, 0)
-            "   <Option name='STRICT' type='boolean' description='Whether "
-            "strict/pedantic decoding should be adopted. Set to NO to allow "
-            "decoding broken files' default='YES'/>"
-#endif
-            "   <Option name='1BIT_ALPHA_PROMOTION' type='boolean' "
-            "description='Whether a 1-bit alpha channel should be promoted to "
-            "8-bit' default='YES'/>"
-            "   <Option name='OPEN_REMOTE_GML' type='boolean' "
-            "description='Whether "
-            "to load remote vector layers referenced by a link in a GMLJP2 v2 "
-            "box' "
-            "default='NO'/>"
-            "   <Option name='GEOREF_SOURCES' type='string' description='Comma "
-            "separated list made with values "
-            "INTERNAL/GMLJP2/GEOJP2/WORLDFILE/PAM/NONE that describe the "
-            "priority "
-            "order for georeferencing' default='PAM,GEOJP2,GMLJP2,WORLDFILE'/>"
-            "   <Option name='USE_TILE_AS_BLOCK' type='boolean' "
-            "description='Whether to always use the JPEG-2000 block size as "
-            "the "
-            "GDAL block size' default='NO'/>"
-            "</OpenOptionList>");
-
-        poDriver->SetMetadataItem(
-            GDAL_DMD_CREATIONOPTIONLIST,
-            "<CreationOptionList>"
-            "   <Option name='CODEC' type='string-select' default='according "
-            "to "
-            "file extension. If unknown, default to J2K'>"
-            "       <Value>JP2</Value>"
-            "       <Value>J2K</Value>"
-            "   </Option>"
-            "   <Option name='GeoJP2' type='boolean' description='Whether to "
-            "emit "
-            "a GeoJP2 box' default='YES'/>"
-            "   <Option name='GMLJP2' type='boolean' description='Whether to "
-            "emit "
-            "a GMLJP2 v1 box' default='YES'/>"
-            "   <Option name='GMLJP2V2_DEF' type='string' "
-            "description='Definition "
-            "file to describe how a GMLJP2 v2 box should be generated. If set "
-            "to "
-            "YES, a minimal instance will be created'/>"
-            "   <Option name='QUALITY' type='string' description='Single "
-            "quality "
-            "value or comma separated list of increasing quality values for "
-            "several layers, each in the 0-100 range' default='25'/>"
-            "   <Option name='REVERSIBLE' type='boolean' description='True if "
-            "the "
-            "compression is reversible' default='false'/>"
-            "   <Option name='RESOLUTIONS' type='int' description='Number of "
-            "resolutions.' min='1' max='30'/>"
-            "   <Option name='BLOCKXSIZE' type='int' description='Tile Width' "
-            "default='1024'/>"
-            "   <Option name='BLOCKYSIZE' type='int' description='Tile Height' "
-            "default='1024'/>"
-            "   <Option name='PROGRESSION' type='string-select' default='LRCP'>"
-            "       <Value>LRCP</Value>"
-            "       <Value>RLCP</Value>"
-            "       <Value>RPCL</Value>"
-            "       <Value>PCRL</Value>"
-            "       <Value>CPRL</Value>"
-            "   </Option>"
-            "   <Option name='SOP' type='boolean' description='True to insert "
-            "SOP "
-            "markers' default='false'/>"
-            "   <Option name='EPH' type='boolean' description='True to insert "
-            "EPH "
-            "markers' default='false'/>"
-            "   <Option name='YCBCR420' type='boolean' description='if RGB "
-            "must be "
-            "resampled to YCbCr 4:2:0' default='false'/>"
-            "   <Option name='YCC' type='boolean' description='if RGB must be "
-            "transformed to YCC color space (lossless MCT transform)' "
-            "default='YES'/>"
-            "   <Option name='NBITS' type='int' description='Bits (precision) "
-            "for "
-            "sub-byte files (1-7), sub-uint16 (9-15), sub-uint32 (17-31)'/>"
-            "   <Option name='1BIT_ALPHA' type='boolean' description='Whether "
-            "to "
-            "encode the alpha channel as a 1-bit channel' default='NO'/>"
-            "   <Option name='ALPHA' type='boolean' description='Whether to "
-            "force "
-            "encoding last channel as alpha channel' default='NO'/>"
-            "   <Option name='PROFILE' type='string-select' description='Which "
-            "codestream profile to use' default='AUTO'>"
-            "       <Value>AUTO</Value>"
-            "       <Value>UNRESTRICTED</Value>"
-            "       <Value>PROFILE_1</Value>"
-            "   </Option>"
-            "   <Option name='INSPIRE_TG' type='boolean' description='Whether "
-            "to "
-            "use features that comply with Inspire Orthoimagery Technical "
-            "Guidelines' default='NO'/>"
-            "   <Option name='JPX' type='boolean' description='Whether to "
-            "advertise JPX features when a GMLJP2 box is written (or use JPX "
-            "branding if GMLJP2 v2)' default='YES'/>"
-            "   <Option name='GEOBOXES_AFTER_JP2C' type='boolean' "
-            "description='Whether to place GeoJP2/GMLJP2 boxes after the "
-            "code-stream' default='NO'/>"
-            "   <Option name='PRECINCTS' type='string' description='Precincts "
-            "size "
-            "as a string of the form {w,h},{w,h},... with power-of-two "
-            "values'/>"
-            "   <Option name='TILEPARTS' type='string-select' "
-            "description='Whether "
-            "to generate tile-parts and according to which criterion' "
-            "default='DISABLED'>"
-            "       <Value>DISABLED</Value>"
-            "       <Value>RESOLUTIONS</Value>"
-            "       <Value>LAYERS</Value>"
-            "       <Value>COMPONENTS</Value>"
-            "   </Option>"
-            "   <Option name='CODEBLOCK_WIDTH' type='int' "
-            "description='Codeblock "
-            "width' default='64' min='4' max='1024'/>"
-            "   <Option name='CODEBLOCK_HEIGHT' type='int' "
-            "description='Codeblock "
-            "height' default='64' min='4' max='1024'/>"
-            "   <Option name='CT_COMPONENTS' type='int' min='3' max='4' "
-            "description='If there is one color table, number of color table "
-            "components to write. Autodetected if not specified.'/>"
-            "   <Option name='WRITE_METADATA' type='boolean' "
-            "description='Whether "
-            "metadata should be written, in a dedicated JP2 XML box' "
-            "default='NO'/>"
-            "   <Option name='MAIN_MD_DOMAIN_ONLY' type='boolean' "
-            "description='(Only if WRITE_METADATA=YES) Whether only metadata "
-            "from "
-            "the main domain should be written' default='NO'/>"
-            "   <Option name='USE_SRC_CODESTREAM' type='boolean' "
-            "description='When "
-            "source dataset is JPEG2000, whether to reuse the codestream of "
-            "the "
-            "source dataset unmodified' default='NO'/>"
-#if IS_OPENJPEG_OR_LATER(2, 3, 0)
-            "   <Option name='CODEBLOCK_STYLE' type='string' "
-            "description='Comma-separated combination of BYPASS, RESET, "
-            "TERMALL, "
-            "VSC, PREDICTABLE, SEGSYM or value between 0 and 63'/>"
-#endif
-#if IS_OPENJPEG_OR_LATER(2, 4, 0)
-            "   <Option name='PLT' type='boolean' description='True to insert "
-            "PLT "
-            "marker segments' default='false'/>"
-#endif
-#if IS_OPENJPEG_OR_LATER(2, 5, 0)
-            "   <Option name='TLM' type='boolean' description='True to insert "
-            "TLM "
-            "marker segments' default='false'/>"
-#endif
-            "   <Option name='COMMENT' type='string' description='Content of "
-            "the "
-            "comment (COM) marker'/>"
-            "</CreationOptionList>");
     }
 };

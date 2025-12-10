@@ -256,7 +256,7 @@ static inline int64_t findHighest(int64_t w, int64_t h, int64_t px, int64_t ln, 
 }
 
 /**
- * @typedef {Uint8Array | Int16Array | Uint16Array | Int32Array | Uint32Array | Float32Array | Float64Array} TypedArray
+ * @typedef {T extends number ? Uint8Array | Int16Array | Uint16Array | Int32Array | Uint32Array | import('@petamoriken/float16').Float16Array | Float32Array | Float64Array : T extends bigint ? BigInt64Array | BigUint64Array : never} TypedArray<T = number>
  * @memberof RasterBandPixels
  */
 
@@ -277,7 +277,7 @@ static inline int64_t findHighest(int64_t w, int64_t h, int64_t px, int64_t ln, 
 /**
  * Reads a region of pixels.
  *
- * @method read
+ * @method read<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @throws {Error}
@@ -285,7 +285,7 @@ static inline int64_t findHighest(int64_t w, int64_t h, int64_t px, int64_t ln, 
  * @param {number} y
  * @param {number} width
  * @param {number} height
- * @param {TypedArray} [data] The `TypedArray` to put the data in. A new array is created if not given.
+ * @param {T} [data] The `TypedArray` to put the data in. A new array is created if not given.
  * @param {ReadOptions} [options]
  * @param {number} [options.buffer_width=x_size]
  * @param {number} [options.buffer_height=y_size]
@@ -294,21 +294,21 @@ static inline int64_t findHighest(int64_t w, int64_t h, int64_t px, int64_t ln, 
  * @param {number} [options.line_space]
  * @param {string} [options.resampling] Resampling algorithm ({@link GRA|available options})
  * @param {ProgressCb} [options.progress_cb]
- * @return {TypedArray} A `TypedArray` of values.
+ * @return {T} A `TypedArray` of values.
  */
 
 /**
  * Asynchronously reads a region of pixels.
  * @async
  *
- * @method readAsync
+ * @method readAsync<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @param {number} x
  * @param {number} y
  * @param {number} width the width
  * @param {number} height
- * @param {TypedArray} [data] The `TypedArray` to put the data in. A new array is created if not given.
+ * @param {T} [data] The `TypedArray` to put the data in. A new array is created if not given.
  * @param {ReadOptions} [options]
  * @param {number} [options.buffer_width=x_size]
  * @param {number} [options.buffer_height=y_size]
@@ -317,10 +317,13 @@ static inline int64_t findHighest(int64_t w, int64_t h, int64_t px, int64_t ln, 
  * @param {number} [options.line_space]
  * @param {string} [options.resampling] Resampling algorithm ({@link GRA|available options}
  * @param {ProgressCb} [options.progress_cb]
- * @param {callback<TypedArray>} [callback=undefined]
- * @return {Promise<TypedArray>} A `TypedArray` of values.
+ * @param {callback<T>} [callback=undefined]
+ * @return {Promise<T>} A `TypedArray` of values.
  */
 GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
+#ifdef DEBUG_MACOS_FREEZE
+  printf("RasterBandPixels::read start\n");
+#endif
 
   RasterBand *band;
   if ((band = parent(info)) == nullptr) return;
@@ -360,7 +363,11 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
     }
   }
 
-  bytes_per_pixel = GDALGetDataTypeSize(type) / 8;
+  bytes_per_pixel = GDALGetDataTypeSizeBytes(type);
+  if (bytes_per_pixel == 0) {
+    Nan::ThrowError("Invalid GDAL data type");
+    return;
+  }
   pixel_space = bytes_per_pixel;
   NODE_ARG_INT_OPT(8, "pixel_space", pixel_space);
   line_space = pixel_space * buffer_w;
@@ -399,6 +406,9 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
   }
 
   GDALRasterBand *gdal_band = band->get();
+#ifdef DEBUG_MACOS_FREEZE
+  printf("RasterBandPixels::read acquire dataset\n");
+#endif
   GDALAsyncableJob<CPLErr> job(band->parent_uid);
   job.persist("array", obj);
   job.persist(band->handle());
@@ -407,6 +417,9 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
   data = (uint8_t *)data + offset * bytes_per_pixel;
   job.main = [gdal_band, x, y, w, h, data, buffer_w, buffer_h, type, pixel_space, line_space, resampling, cb](
                const GDALExecutionProgress &progress) {
+#ifdef DEBUG_MACOS_FREEZE
+    printf("RasterBandPixels::read execute\n");
+#endif
     std::shared_ptr<GDALRasterIOExtraArg> extra(new GDALRasterIOExtraArg);
     INIT_RASTERIO_EXTRA_ARG(*extra);
     extra->eResampleAlg = resampling;
@@ -418,12 +431,23 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
     CPLErrorReset();
     CPLErr err =
       gdal_band->RasterIO(GF_Read, x, y, w, h, data, buffer_w, buffer_h, type, pixel_space, line_space, extra.get());
+#ifdef DEBUG_MACOS_FREEZE
+    printf("RasterBandPixels::read RasterIO done, err = %d\n", (int)err);
+#endif
 
     if (err != CE_None) throw CPLGetLastErrorMsg();
     return err;
   };
 
-  job.rval = [](CPLErr err, const GetFromPersistentFunc &getter) { return getter("array"); };
+  job.rval = [](CPLErr err, const GetFromPersistentFunc &getter) {
+#ifdef DEBUG_MACOS_FREEZE
+    printf("RasterBandPixels::read return result to JS\n");
+#endif
+    return getter("array");
+  };
+#ifdef DEBUG_MACOS_FREEZE
+  printf("RasterBandPixels::read schedule\n");
+#endif
   job.run(info, async, 13);
 }
 
@@ -441,7 +465,7 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
 /**
  * Writes a region of pixels.
  *
- * @method write
+ * @method write<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @throws {Error}
@@ -449,7 +473,7 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
  * @param {number} y
  * @param {number} width
  * @param {number} height
- * @param {TypedArray} [data] The `TypedArray` to write to the band.
+ * @param {T} [data] The `TypedArray` to write to the band.
  * @param {WriteOptions} [options]
  * @param {number} [options.buffer_width=x_size]
  * @param {number} [options.buffer_height=y_size]
@@ -462,14 +486,14 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::read) {
  * Asynchronously writes a region of pixels.
  * @async
  *
- * @method writeAsync
+ * @method writeAsync<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @param {number} x
  * @param {number} y
  * @param {number} width
  * @param {number} height
- * @param {TypedArray} [data] The `TypedArray` to write to the band.
+ * @param {T} [data] The `TypedArray` to write to the band.
  * @param {WriteOptions} [options]
  * @param {number} [options.buffer_width=x_size]
  * @param {number} [options.buffer_height=y_size]
@@ -511,7 +535,11 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::write) {
     return;
   }
 
-  bytes_per_pixel = GDALGetDataTypeSize(type) / 8;
+  bytes_per_pixel = GDALGetDataTypeSizeBytes(type);
+  if (bytes_per_pixel == 0) {
+    Nan::ThrowError("Invalid GDAL data type");
+    return;
+  }
   pixel_space = bytes_per_pixel;
   NODE_ARG_INT_OPT(7, "pixel_space", pixel_space);
   line_space = pixel_space * buffer_w;
@@ -566,29 +594,29 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::write) {
 /**
  * Reads a block of pixels.
  *
- * @method readBlock
+ * @method readBlock<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @throws {Error}
  * @param {number} x
  * @param {number} y
- * @param {TypedArray} [data] The `TypedArray` to put the data in. A new array is created if not given.
- * @return {TypedArray} A `TypedArray` of values.
+ * @param {T} [data] The `TypedArray` to put the data in. A new array is created if not given.
+ * @return {T} A `TypedArray` of values.
  */
 
 /**
  * Reads a block of pixels.
  * @async
  *
- * @method readBlockAsync
+ * @method readBlockAsync<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @throws {Error}
  * @param {number} x
  * @param {number} y
- * @param {TypedArray} [data] The `TypedArray` to put the data in. A new array is created if not given.
- * @param {callback<TypedArray>} [callback=undefined]
- * @return {Promise<TypedArray>} A `TypedArray` of values.
+ * @param {T} [data] The `TypedArray` to put the data in. A new array is created if not given.
+ * @param {callback<T>} [callback=undefined]
+ * @return {Promise<T>} A `TypedArray` of values.
  */
 
 GDAL_ASYNCABLE_DEFINE(RasterBandPixels::readBlock) {
@@ -642,26 +670,26 @@ GDAL_ASYNCABLE_DEFINE(RasterBandPixels::readBlock) {
 /**
  * Writes a block of pixels.
  *
- * @method writeBlock
+ * @method writeBlock<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @throws {Error}
  * @param {number} x
  * @param {number} y
- * @param {TypedArray} data The `TypedArray` of values to write to the band.
+ * @param {T} data The `TypedArray` of values to write to the band.
  */
 
 /**
  * Writes a block of pixels.
  * @async
  *
- * @method writeBlockAsync
+ * @method writeBlockAsync<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof RasterBandPixels
  * @throws {Error}
  * @param {number} x
  * @param {number} y
- * @param {TypedArray} data The `TypedArray` of values to write to the band.
+ * @param {T} data The `TypedArray` of values to write to the band.
  * @param {callback<void>} [callback=undefined]
  * @return {Promise<void>}
  */

@@ -10,29 +10,14 @@
  * Copyright (c) 2005, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2008-2018, Even Rouault <even.rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
 
 #include "hdf5_api.h"
 #include "hdf5dataset.h"
+#include "hdf5drivercore.h"
 #include "hdf5vfl.h"
 
 #include <algorithm>
@@ -40,9 +25,11 @@
 #include <string.h>
 #include <string>
 #include <cctype>
+#include <limits>
 
 #include "cpl_conv.h"
 #include "cpl_error.h"
+#include "cpl_float.h"
 #include "cpl_string.h"
 #include "gdal.h"
 #include "gdal_frmts.h"
@@ -92,93 +79,6 @@ static void HDF5DatasetDriverUnload(GDALDriver *)
 }
 
 /************************************************************************/
-/*                    HDF5DriverGetSubdatasetInfo()                     */
-/************************************************************************/
-
-struct HDF5DriverSubdatasetInfo : public GDALSubdatasetInfo
-{
-  public:
-    explicit HDF5DriverSubdatasetInfo(const std::string &fileName)
-        : GDALSubdatasetInfo(fileName)
-    {
-    }
-
-    // GDALSubdatasetInfo interface
-  private:
-    void parseFileName() override
-    {
-
-        if (!STARTS_WITH_CI(m_fileName.c_str(), "HDF5:"))
-        {
-            return;
-        }
-
-        CPLStringList aosParts{CSLTokenizeString2(m_fileName.c_str(), ":", 0)};
-        const int iPartsCount{CSLCount(aosParts)};
-
-        if (iPartsCount >= 3)
-        {
-
-            m_driverPrefixComponent = aosParts[0];
-
-            std::string part1{aosParts[1]};
-            if (!part1.empty() && part1[0] == '"')
-            {
-                part1 = part1.substr(1);
-            }
-
-            int subdatasetIndex{2};
-            const bool hasDriveLetter{
-                part1.length() == 1 && std::isalpha(part1.at(0)) &&
-                (strlen(aosParts[2]) > 1 &&
-                 (aosParts[2][0] == '\\' ||
-                  (aosParts[2][0] == '/' && aosParts[2][1] != '/')))};
-
-            const bool hasProtocol{part1 == "/vsicurl/http" ||
-                                   part1 == "/vsicurl/https" ||
-                                   part1 == "/vsicurl_streaming/http" ||
-                                   part1 == "/vsicurl_streaming/https"};
-
-            m_pathComponent = aosParts[1];
-
-            if (hasDriveLetter || hasProtocol)
-            {
-                m_pathComponent.append(":");
-                m_pathComponent.append(aosParts[2]);
-                subdatasetIndex++;
-            }
-
-            if (iPartsCount > subdatasetIndex)
-            {
-                m_subdatasetComponent = aosParts[subdatasetIndex];
-
-                // Append any remaining part
-                for (int i = subdatasetIndex + 1; i < iPartsCount; ++i)
-                {
-                    m_subdatasetComponent.append(":");
-                    m_subdatasetComponent.append(aosParts[i]);
-                }
-            }
-        }
-    }
-};
-
-static GDALSubdatasetInfo *HDF5DriverGetSubdatasetInfo(const char *pszFileName)
-{
-    if (STARTS_WITH_CI(pszFileName, "HDF5:"))
-    {
-        std::unique_ptr<GDALSubdatasetInfo> info =
-            cpl::make_unique<HDF5DriverSubdatasetInfo>(pszFileName);
-        if (!info->GetSubdatasetComponent().empty() &&
-            !info->GetPathComponent().empty())
-        {
-            return info.release();
-        }
-    }
-    return nullptr;
-}
-
-/************************************************************************/
 /* ==================================================================== */
 /*                              HDF5Dataset                             */
 /* ==================================================================== */
@@ -190,32 +90,30 @@ static GDALSubdatasetInfo *HDF5DriverGetSubdatasetInfo(const char *pszFileName)
 void GDALRegister_HDF5()
 
 {
-    if (GDALGetDriverByName("HDF5") != nullptr)
+    if (GDALGetDriverByName(HDF5_DRIVER_NAME) != nullptr)
         return;
 
     GDALDriver *poDriver = new GDALDriver();
 
-    poDriver->SetDescription("HDF5");
-    poDriver->SetMetadataItem(GDAL_DCAP_RASTER, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_LONGNAME,
-                              "Hierarchical Data Format Release 5");
-    poDriver->SetMetadataItem(GDAL_DMD_HELPTOPIC, "drivers/raster/hdf5.html");
-    poDriver->SetMetadataItem(GDAL_DMD_EXTENSIONS, "h5 hdf5");
-    poDriver->SetMetadataItem(GDAL_DMD_SUBDATASETS, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_VIRTUALIO, "YES");
-
-    poDriver->SetMetadataItem(GDAL_DCAP_MULTIDIM_RASTER, "YES");
+    HDF5DriverSetCommonMetadata(poDriver);
 
     poDriver->pfnOpen = HDF5Dataset::Open;
-    poDriver->pfnIdentify = HDF5Dataset::Identify;
     poDriver->pfnUnloadDriver = HDF5DatasetDriverUnload;
-    poDriver->pfnGetSubdatasetInfoFunc = HDF5DriverGetSubdatasetInfo;
+
+#if (defined(H5_VERS_MAJOR) &&                                                 \
+     (H5_VERS_MAJOR >= 2 || (H5_VERS_MAJOR == 1 && H5_VERS_MINOR > 10) ||      \
+      (H5_VERS_MAJOR == 1 && H5_VERS_MINOR == 10 && H5_VERS_RELEASE >= 5)))
+    poDriver->SetMetadataItem("HAVE_H5Dget_chunk_info", "YES");
+#endif
+
     GetGDALDriverManager()->RegisterDriver(poDriver);
 
 #ifdef HDF5_PLUGIN
     GDALRegister_HDF5Image();
     GDALRegister_BAG();
     GDALRegister_S102();
+    GDALRegister_S104();
+    GDALRegister_S111();
 #endif
 }
 
@@ -296,6 +194,10 @@ GDALDataType HDF5Dataset::GetDataType(hid_t TypeID)
             return GDT_Unknown;
 #endif
         }
+#ifdef HDF5_HAVE_FLOAT16
+        else if (H5Tequal(H5T_NATIVE_FLOAT16, TypeID))
+            return GDT_Float32;
+#endif
         else if (H5Tequal(H5T_NATIVE_FLOAT, TypeID))
             return GDT_Float32;
         else if (H5Tequal(H5T_NATIVE_DOUBLE, TypeID))
@@ -353,6 +255,10 @@ GDALDataType HDF5Dataset::GetDataType(hid_t TypeID)
             eDataType = GDT_Unknown;
 #endif
         }
+#ifdef HDF5_HAVE_FLOAT16
+        else if (H5Tequal(H5T_NATIVE_FLOAT16, ElemTypeID))
+            eDataType = GDT_CFloat32;
+#endif
         else if (H5Tequal(H5T_NATIVE_FLOAT, ElemTypeID))
             eDataType = GDT_CFloat32;
         else if (H5Tequal(H5T_NATIVE_DOUBLE, ElemTypeID))
@@ -365,6 +271,32 @@ GDALDataType HDF5Dataset::GetDataType(hid_t TypeID)
     }
 
     return GDT_Unknown;
+}
+
+/************************************************************************/
+/*                          IsNativeCFloat16()                          */
+/************************************************************************/
+
+/* static*/ bool HDF5Dataset::IsNativeCFloat16(hid_t hDataType)
+{
+#ifdef HDF5_HAVE_FLOAT16
+    // For complex the compound type must contain 2 elements
+    if (H5Tget_class(hDataType) != H5T_COMPOUND ||
+        H5Tget_nmembers(hDataType) != 2)
+        return false;
+
+    // For complex the native types of both elements should be the same
+    hid_t ElemTypeID = H5Tget_member_type(hDataType, 0);
+    hid_t Elem2TypeID = H5Tget_member_type(hDataType, 1);
+    const bool bRet = H5Tequal(ElemTypeID, H5T_NATIVE_FLOAT16) > 0 &&
+                      H5Tequal(Elem2TypeID, H5T_NATIVE_FLOAT16) > 0;
+    H5Tclose(ElemTypeID);
+    H5Tclose(Elem2TypeID);
+    return bRet;
+#else
+    CPL_IGNORE_RET_VAL(hDataType);
+    return false;
+#endif
 }
 
 /************************************************************************/
@@ -399,6 +331,10 @@ const char *HDF5Dataset::GetDataTypeName(hid_t TypeID)
             return "32/64-bit integer";
         else if (H5Tequal(H5T_NATIVE_ULONG, TypeID))
             return "32/64-bit unsigned integer";
+#ifdef HDF5_HAVE_FLOAT16
+        else if (H5Tequal(H5T_NATIVE_FLOAT16, TypeID))
+            return "16-bit floating-point";
+#endif
         else if (H5Tequal(H5T_NATIVE_FLOAT, TypeID))
             return "32-bit floating-point";
         else if (H5Tequal(H5T_NATIVE_DOUBLE, TypeID))
@@ -443,6 +379,13 @@ const char *HDF5Dataset::GetDataTypeName(hid_t TypeID)
             H5Tclose(ElemTypeID);
             return "complex, 32/64-bit integer";
         }
+#ifdef HDF5_HAVE_FLOAT16
+        else if (H5Tequal(H5T_NATIVE_FLOAT16, ElemTypeID))
+        {
+            H5Tclose(ElemTypeID);
+            return "complex, 16-bit floating-point";
+        }
+#endif
         else if (H5Tequal(H5T_NATIVE_FLOAT, ElemTypeID))
         {
             H5Tclose(ElemTypeID);
@@ -456,118 +399,6 @@ const char *HDF5Dataset::GetDataTypeName(hid_t TypeID)
     }
 
     return "Unknown";
-}
-
-/************************************************************************/
-/*                              Identify()                              */
-/************************************************************************/
-
-int HDF5Dataset::Identify(GDALOpenInfo *poOpenInfo)
-
-{
-    if ((poOpenInfo->nOpenFlags & GDAL_OF_MULTIDIM_RASTER) &&
-        STARTS_WITH(poOpenInfo->pszFilename, "HDF5:"))
-    {
-        return TRUE;
-    }
-
-    // Is it an HDF5 file?
-    constexpr char achSignature[] = "\211HDF\r\n\032\n";
-
-    if (!poOpenInfo->pabyHeader)
-        return FALSE;
-
-    const CPLString osExt(CPLGetExtension(poOpenInfo->pszFilename));
-
-    const auto IsRecognizedByNetCDFDriver = [&osExt, poOpenInfo]()
-    {
-        if ((EQUAL(osExt, "NC") || EQUAL(osExt, "CDF") || EQUAL(osExt, "NC4") ||
-             EQUAL(osExt, "gmac")) &&
-            GDALGetDriverByName("netCDF") != nullptr)
-        {
-            const char *const apszAllowedDriver[] = {"netCDF", nullptr};
-            CPLPushErrorHandler(CPLQuietErrorHandler);
-            GDALDatasetH hDS = GDALOpenEx(
-                poOpenInfo->pszFilename,
-                GDAL_OF_RASTER | GDAL_OF_MULTIDIM_RASTER | GDAL_OF_VECTOR,
-                apszAllowedDriver, nullptr, nullptr);
-            CPLPopErrorHandler();
-            if (hDS)
-            {
-                GDALClose(hDS);
-                return true;
-            }
-        }
-        return false;
-    };
-
-    if (memcmp(poOpenInfo->pabyHeader, achSignature, 8) == 0 ||
-        (poOpenInfo->nHeaderBytes > 512 + 8 &&
-         memcmp(poOpenInfo->pabyHeader + 512, achSignature, 8) == 0))
-    {
-        // The tests to avoid opening KEA and BAG drivers are not
-        // necessary when drivers are built in the core lib, as they
-        // are registered after HDF5, but in the case of plugins, we
-        // cannot do assumptions about the registration order.
-
-        // Avoid opening kea files if the kea driver is available.
-        if (EQUAL(osExt, "KEA") && GDALGetDriverByName("KEA") != nullptr)
-        {
-            return FALSE;
-        }
-
-        // Avoid opening BAG files if the bag driver is available.
-        if (EQUAL(osExt, "BAG") && GDALGetDriverByName("BAG") != nullptr)
-        {
-            return FALSE;
-        }
-
-        // Avoid opening NC files if the netCDF driver is available and
-        // they are recognized by it.
-        if (IsRecognizedByNetCDFDriver())
-        {
-            return FALSE;
-        }
-
-        return TRUE;
-    }
-
-    if (memcmp(poOpenInfo->pabyHeader, "<HDF_UserBlock>", 15) == 0)
-    {
-        if (H5Fis_hdf5(poOpenInfo->pszFilename))
-            return TRUE;
-    }
-
-    // The HDF5 signature can be at offsets 512, 1024, 2048, etc.
-    if (poOpenInfo->fpL != nullptr &&
-        (EQUAL(osExt, "h5") || EQUAL(osExt, "hdf5") || EQUAL(osExt, "nc") ||
-         EQUAL(osExt, "cdf") || EQUAL(osExt, "nc4")))
-    {
-        vsi_l_offset nOffset = 512;
-        for (int i = 0; i < 64; i++)
-        {
-            GByte abyBuf[8];
-            if (VSIFSeekL(poOpenInfo->fpL, nOffset, SEEK_SET) != 0 ||
-                VSIFReadL(abyBuf, 1, 8, poOpenInfo->fpL) != 8)
-            {
-                break;
-            }
-            if (memcmp(abyBuf, achSignature, 8) == 0)
-            {
-                // Avoid opening NC files if the netCDF driver is available and
-                // they are recognized by it.
-                if (IsRecognizedByNetCDFDriver())
-                {
-                    return FALSE;
-                }
-
-                return TRUE;
-            }
-            nOffset *= 2;
-        }
-    }
-
-    return FALSE;
 }
 
 /************************************************************************/
@@ -622,7 +453,7 @@ hid_t GDAL_HDF5Open(const std::string &osFilename)
 /************************************************************************/
 GDALDataset *HDF5Dataset::Open(GDALOpenInfo *poOpenInfo)
 {
-    if (!Identify(poOpenInfo))
+    if (!HDF5DatasetIdentify(poOpenInfo))
         return nullptr;
 
     HDF5_GLOBAL_LOCK();
@@ -690,6 +521,34 @@ GDALDataset *HDF5Dataset::Open(GDALOpenInfo *poOpenInfo)
         return GDALDataset::Open(osS102Filename.c_str(), GDAL_OF_RASTER);
     }
 
+    // Safety belt if S104Dataset::Identify() failed
+    if (STARTS_WITH(
+            poDS->m_aosMetadata.FetchNameValueDef("productSpecification", ""),
+            "INT.IHO.S-104.") &&
+        GDALGetDriverByName("S104") != nullptr)
+    {
+        delete poDS;
+        std::string osS104Filename("S104:\"");
+        osS104Filename +=
+            CPLString(poOpenInfo->pszFilename).replaceAll("\"", "\\\"");
+        osS104Filename += '"';
+        return GDALDataset::Open(osS104Filename.c_str(), GDAL_OF_RASTER);
+    }
+
+    // Safety belt if S111Dataset::Identify() failed
+    if (STARTS_WITH(
+            poDS->m_aosMetadata.FetchNameValueDef("productSpecification", ""),
+            "INT.IHO.S-111.") &&
+        GDALGetDriverByName("S111") != nullptr)
+    {
+        delete poDS;
+        std::string osS111Filename("S111:\"");
+        osS111Filename +=
+            CPLString(poOpenInfo->pszFilename).replaceAll("\"", "\\\"");
+        osS111Filename += '"';
+        return GDALDataset::Open(osS111Filename.c_str(), GDAL_OF_RASTER);
+    }
+
     poDS->SetMetadata(poDS->m_aosMetadata.List());
 
     if (CSLCount(poDS->papszSubDatasets) / 2 >= 1)
@@ -714,9 +573,7 @@ GDALDataset *HDF5Dataset::Open(GDALOpenInfo *poOpenInfo)
         if (poOpenInfo->eAccess == GA_Update)
         {
             delete poDS;
-            CPLError(CE_Failure, CPLE_NotSupported,
-                     "The HDF5 driver does not support update access to "
-                     "existing datasets.");
+            ReportUpdateNotSupportedByDriver("HDF5");
             return nullptr;
         }
     }
@@ -1077,40 +934,60 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
     const unsigned int nAttrDims =
         H5Sget_simple_extent_dims(hAttrSpace, nSize, nullptr);
 
-    unsigned int nAttrElmts = 1;
+    size_t nAttrElmts = 1;
     for (hsize_t i = 0; i < nAttrDims; i++)
     {
-        nAttrElmts *= static_cast<int>(nSize[i]);
+        if (nSize[i] > std::numeric_limits<size_t>::max() / nAttrElmts)
+        {
+            H5Sclose(hAttrSpace);
+            H5Tclose(hAttrNativeType);
+            H5Tclose(hAttrTypeID);
+            H5Aclose(hAttrID);
+            return 0;
+        }
+        nAttrElmts *= static_cast<size_t>(nSize[i]);
     }
 
     if (H5Tget_class(hAttrNativeType) == H5T_STRING)
     {
         if (H5Tis_variable_str(hAttrNativeType))
         {
-            char **papszStrings =
-                static_cast<char **>(CPLMalloc(nAttrElmts * sizeof(char *)));
-
-            // Read the values.
-            H5Aread(hAttrID, hAttrNativeType, papszStrings);
-
-            // Concatenate all values as one string separated by a space.
-            psContext->m_osValue = papszStrings[0] ? papszStrings[0] : "{NULL}";
-            for (hsize_t i = 1; i < nAttrElmts; i++)
+            char **papszStrings = static_cast<char **>(
+                VSI_MALLOC2_VERBOSE(nAttrElmts, sizeof(char *)));
+            if (papszStrings)
             {
-                psContext->m_osValue += " ";
-                psContext->m_osValue +=
-                    papszStrings[i] ? papszStrings[i] : "{NULL}";
-            }
+                // Read the values.
+                H5Aread(hAttrID, hAttrNativeType, papszStrings);
 
-            H5Dvlen_reclaim(hAttrNativeType, hAttrSpace, H5P_DEFAULT,
-                            papszStrings);
-            CPLFree(papszStrings);
+                // Concatenate all values as one string separated by a space.
+                psContext->m_osValue =
+                    papszStrings[0] ? papszStrings[0] : "{NULL}";
+                for (hsize_t i = 1; i < nAttrElmts; i++)
+                {
+                    psContext->m_osValue += " ";
+                    psContext->m_osValue +=
+                        papszStrings[i] ? papszStrings[i] : "{NULL}";
+                }
+
+                H5Dvlen_reclaim(hAttrNativeType, hAttrSpace, H5P_DEFAULT,
+                                papszStrings);
+                CPLFree(papszStrings);
+            }
         }
         else
         {
             const hsize_t nAttrSize = H5Aget_storage_size(hAttrID);
-            psContext->m_osValue.resize(static_cast<size_t>(nAttrSize));
-            H5Aread(hAttrID, hAttrNativeType, &psContext->m_osValue[0]);
+            if (nAttrSize <= static_cast<hsize_t>(INT_MAX))
+            {
+                try
+                {
+                    psContext->m_osValue.resize(static_cast<size_t>(nAttrSize));
+                    H5Aread(hAttrID, hAttrNativeType, &psContext->m_osValue[0]);
+                }
+                catch (const std::exception &)
+                {
+                }
+            }
         }
     }
     else
@@ -1122,12 +999,13 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
 
         if (nAttrElmts > 0)
         {
-            buf = CPLMalloc(nAttrElmts * H5Tget_size(hAttrNativeType));
-            H5Aread(hAttrID, hAttrNativeType, buf);
+            buf = VSI_MALLOC2_VERBOSE(nAttrElmts, H5Tget_size(hAttrNativeType));
+            if (buf)
+                H5Aread(hAttrID, hAttrNativeType, buf);
         }
         const bool bIsSCHAR = H5Tequal(H5T_NATIVE_SCHAR, hAttrNativeType) > 0;
         const bool bIsUCHAR = H5Tequal(H5T_NATIVE_UCHAR, hAttrNativeType) > 0;
-        if ((bIsSCHAR || bIsUCHAR) &&
+        if (buf && (bIsSCHAR || bIsUCHAR) &&
             CPLTestBool(CPLGetConfigOption("GDAL_HDF5_CHAR_AS_STRING", "NO")))
         {
             // Compatibility mode with ancient GDAL versions where we consider
@@ -1144,7 +1022,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (bIsSCHAR)
+        else if (buf && bIsSCHAR)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1161,7 +1039,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (bIsUCHAR)
+        else if (buf && bIsUCHAR)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1178,7 +1056,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_SHORT, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_SHORT, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1194,7 +1072,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_USHORT, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_USHORT, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1211,7 +1089,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_INT, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_INT, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1227,7 +1105,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_UINT, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_UINT, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1244,7 +1122,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_INT64, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_INT64, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1261,7 +1139,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_UINT64, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_UINT64, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1278,7 +1156,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_LONG, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_LONG, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1294,7 +1172,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_ULONG, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_ULONG, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1311,7 +1189,29 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_FLOAT, hAttrNativeType) > 0)
+#ifdef HDF5_HAVE_FLOAT16
+        else if (buf && H5Tequal(H5T_NATIVE_FLOAT16, hAttrNativeType) > 0)
+        {
+            for (hsize_t i = 0; i < nAttrElmts; i++)
+            {
+                const uint16_t nVal16 = static_cast<uint16_t *>(buf)[i];
+                const uint32_t nVal32 = CPLHalfToFloat(nVal16);
+                float fVal;
+                memcpy(&fVal, &nVal32, sizeof(fVal));
+                CPLsnprintf(szData, nDataLen, "%.8g", fVal);
+                if (psContext->m_osValue.size() > MAX_METADATA_LEN)
+                {
+                    CPLError(CE_Warning, CPLE_OutOfMemory,
+                             "Header data too long. Truncated");
+                    break;
+                }
+                if (i > 0)
+                    psContext->m_osValue += ' ';
+                psContext->m_osValue += szData;
+            }
+        }
+#endif
+        else if (buf && H5Tequal(H5T_NATIVE_FLOAT, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1328,7 +1228,7 @@ static herr_t HDF5AttrIterate(hid_t hH5ObjID, const char *pszAttrName,
                 psContext->m_osValue += szData;
             }
         }
-        else if (H5Tequal(H5T_NATIVE_DOUBLE, hAttrNativeType) > 0)
+        else if (buf && H5Tequal(H5T_NATIVE_DOUBLE, hAttrNativeType) > 0)
         {
             for (hsize_t i = 0; i < nAttrElmts; i++)
             {
@@ -1529,6 +1429,19 @@ CPLErr HDF5Dataset::HDF5ListGroupObjects(HDF5GroupObjects *poRootGroup,
     {
         CreateMetadata(m_hHDF5, poRootGroup, H5G_DATASET, true, m_aosMetadata);
 
+        for (int i = 0; i < poRootGroup->nRank; ++i)
+        {
+            if (poRootGroup->paDims[i] >
+                static_cast<hsize_t>(std::numeric_limits<int>::max()))
+            {
+                CPLDebug("HDF5",
+                         "Not reporting %s as subdataset as at least one of "
+                         "its dimension size exceeds INT_MAX!",
+                         poRootGroup->pszUnderscorePath);
+                return CE_None;
+            }
+        }
+
         CPLString osStr;
         switch (poRootGroup->nRank)
         {
@@ -1558,7 +1471,7 @@ CPLErr HDF5Dataset::HDF5ListGroupObjects(HDF5GroupObjects *poRootGroup,
             int nYDimSize = 0;
             int nOtherDimSize = 0;
             std::string osOtherDimName;
-            for (auto &oDim : oGridMetadata.aoDimensions)
+            for (const auto &oDim : oGridMetadata.aoDimensions)
             {
                 if (oDim.osName == "XDim")
                     nXDimSize = oDim.nSize;
@@ -1817,21 +1730,30 @@ CPLErr HDF5Dataset::HDF5ReadDoubleAttr(const char *pszAttrFullPath,
             else
             {
                 // Get the amount of elements.
-                unsigned int nAttrElmts = 1;
+                int nAttrElmts = 1;
                 for (hsize_t i = 0; i < nAttrDims; i++)
                 {
+                    if (nSize[i] >
+                        static_cast<hsize_t>(std::numeric_limits<int>::max() /
+                                             nAttrElmts))
+                    {
+                        nAttrElmts = 0;
+                        break;
+                    }
                     // For multidimensional attributes
-                    nAttrElmts *= static_cast<unsigned int>(nSize[i]);
+                    nAttrElmts *= static_cast<int>(nSize[i]);
                 }
 
                 if (nLen != nullptr)
                     *nLen = nAttrElmts;
 
                 *pdfValues = static_cast<double *>(
-                    CPLMalloc(nAttrElmts * sizeof(double)));
+                    nAttrElmts ? VSI_MALLOC2_VERBOSE(nAttrElmts, sizeof(double))
+                               : nullptr);
 
                 // Read the attribute contents
-                if (H5Aread(hAttrID, hAttrNativeType, *pdfValues) < 0)
+                if (nAttrElmts == 0 ||
+                    H5Aread(hAttrID, hAttrNativeType, *pdfValues) < 0)
                 {
                     CPLError(CE_Failure, CPLE_OpenFailed,
                              "Attribute %s could not be opened",

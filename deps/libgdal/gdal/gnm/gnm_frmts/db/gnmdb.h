@@ -1,5 +1,4 @@
 /******************************************************************************
- * $Id$
  *
  * Project:  GDAL/OGR Geography Network support (Geographic Network Model)
  * Purpose:  GNM db based generic driver.
@@ -29,34 +28,36 @@
  * DEALINGS IN THE SOFTWARE.
  ****************************************************************************/
 
+#ifndef GNMDB_H_INCLUDED
+#define GNMDB_H_INCLUDED
+
 #include "gnm.h"
 
-class GNMDatabaseNetwork : public GNMGenericNetwork
+class GNMDatabaseNetwork final : public GNMGenericNetwork
 {
   public:
     GNMDatabaseNetwork();
-    virtual ~GNMDatabaseNetwork();
-    virtual CPLErr Open(GDALOpenInfo *poOpenInfo) override;
-    virtual OGRErr DeleteLayer(int) override;
+    ~GNMDatabaseNetwork() override;
+    CPLErr Open(GDALOpenInfo *poOpenInfo) override;
+    OGRErr DeleteLayer(int) override;
     virtual CPLErr Create(const char *pszFilename,
                           char **papszOptions) override;
 
   protected:
-    virtual OGRLayer *
-    ICreateLayer(const char *pszName,
-                 const OGRSpatialReference *poSpatialRef = nullptr,
-                 OGRwkbGeometryType eGType = wkbUnknown,
-                 char **papszOptions = nullptr) override;
+    OGRLayer *ICreateLayer(const char *pszName,
+                           const OGRGeomFieldDefn *poGeomFieldDefn,
+                           CSLConstList papszOptions) override;
+
     virtual int CheckNetworkExist(const char *pszFilename,
                                   char **papszOptions) override;
 
   protected:
-    virtual CPLErr DeleteMetadataLayer() override;
-    virtual CPLErr DeleteGraphLayer() override;
-    virtual CPLErr DeleteFeaturesLayer() override;
-    virtual CPLErr DeleteNetworkLayers() override;
-    virtual CPLErr LoadNetworkLayer(const char *pszLayername) override;
-    virtual bool CheckStorageDriverSupport(const char *pszDriverName) override;
+    CPLErr DeleteMetadataLayer() override;
+    CPLErr DeleteGraphLayer() override;
+    CPLErr DeleteFeaturesLayer() override;
+    CPLErr DeleteNetworkLayers() override;
+    CPLErr LoadNetworkLayer(const char *pszLayername) override;
+    bool CheckStorageDriverSupport(const char *pszDriverName) override;
 
   protected:
     CPLErr FormName(const char *pszFilename, char **papszOptions);
@@ -66,3 +67,5 @@ class GNMDatabaseNetwork : public GNMGenericNetwork
     GDALDataset *m_poDS;
     CPLString m_soNetworkFullName;
 };
+
+#endif  // GNMDB_H_INCLUDED

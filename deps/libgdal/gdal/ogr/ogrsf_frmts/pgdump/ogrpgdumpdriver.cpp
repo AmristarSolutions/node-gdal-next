@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2010-2011, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_pgdump.h"
@@ -77,7 +61,7 @@ void RegisterOGRPGDump()
     poDriver->SetMetadataItem(
         GDAL_DMD_CREATIONOPTIONLIST,
         "<CreationOptionList>"
-#ifdef WIN32
+#ifdef _WIN32
         "  <Option name='LINEFORMAT' type='string-select' "
         "description='end-of-line sequence' default='CRLF'>"
 #else
@@ -99,6 +83,8 @@ void RegisterOGRPGDump()
         "  </Option>"
         "  <Option name='LAUNDER' type='boolean' description='Whether layer "
         "and field names will be laundered' default='YES'/>"
+        "  <Option name='LAUNDER_ASCII' type='boolean' description='Same as "
+        "LAUNDER, but force generation of ASCII identifiers' default='NO'/>"
         "  <Option name='PRECISION' type='boolean' description='Whether fields "
         "created should keep the width and precision' default='YES'/>"
         "  <Option name='DIM' type='string' description='Set to 2 to force the "
@@ -133,6 +119,8 @@ void RegisterOGRPGDump()
         "to write EWKT geometries instead of HEX geometry' default='NO'/>"
         "  <Option name='CREATE_TABLE' type='boolean' description='Whether to "
         "explicitly recreate the table if necessary' default='YES'/>"
+        "  <Option name='SKIP_CONFLICTS' type='boolean' description='Whether "
+        "to ignore conflicts when inserting features' default='NO'/>"
         "  <Option name='DROP_TABLE' type='string-select' description='Whether "
         "to explicitly destroy tables before recreating them' default='YES'>"
         "    <Value>YES</Value>"

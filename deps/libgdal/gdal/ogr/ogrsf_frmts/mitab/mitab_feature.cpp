@@ -10,23 +10,7 @@
  * Copyright (c) 1999-2002, Daniel Morissette
  * Copyright (c) 2014, Even Rouault <even.rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  **********************************************************************/
 
 #include "cpl_port.h"
@@ -64,7 +48,7 @@
  *
  * Constructor.
  **********************************************************************/
-TABFeature::TABFeature(OGRFeatureDefn *poDefnIn)
+TABFeature::TABFeature(const OGRFeatureDefn *poDefnIn)
     : OGRFeature(poDefnIn), m_nMapInfoType(TAB_GEOM_NONE), m_dXMin(0),
       m_dYMin(0), m_dXMax(0), m_dYMax(0), m_bDeletedFlag(FALSE), m_nXMin(0),
       m_nYMin(0), m_nXMax(0), m_nYMax(0), m_nComprOrgX(0), m_nComprOrgY(0)
@@ -202,7 +186,7 @@ void TABFeature::CopyTABFeatureBase(TABFeature *poDestFeature)
     /*-----------------------------------------------------------------
      * Copy fields only if OGRFeatureDefn is the same
      *----------------------------------------------------------------*/
-    OGRFeatureDefn *poThisDefnRef = GetDefnRef();
+    const OGRFeatureDefn *poThisDefnRef = GetDefnRef();
 
     if (poThisDefnRef == poDestFeature->GetDefnRef())
     {
@@ -249,7 +233,8 @@ void TABFeature::CopyTABFeatureBase(TABFeature *poDestFeature)
  * This method calls the generic TABFeature::CopyTABFeatureBase() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABFeature::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABFeature::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -390,9 +375,9 @@ int TABFeature::ReadRecordFromDATFile(TABDATFile *poDATFile)
             }
             case TABFLogical:
             {
-                const char *pszValue = poDATFile->ReadLogicalField(
+                const bool bValue = poDATFile->ReadLogicalField(
                     poDATFile->GetFieldWidth(iField));
-                SetField(iField, pszValue);
+                SetField(iField, bValue ? 1 : 0);
                 break;
             }
             case TABFDate:
@@ -467,7 +452,7 @@ int TABFeature::ReadRecordFromDATFile(TABDATFile *poDATFile)
             default:
                 // Other type???  Impossible!
                 CPLError(CE_Failure, CPLE_AssertionFailed,
-                         "Unsupported field type!");
+                         "Unsupported field type for field %d!", iField);
         }
     }
 
@@ -557,8 +542,9 @@ int TABFeature::WriteRecordToDATFile(TABDATFile *poDATFile,
                     GetFieldAsDouble(iField), poINDFile, panIndexNo[iField]);
                 break;
             case TABFLogical:
-                nStatus = poDATFile->WriteLogicalField(
-                    GetFieldAsString(iField), poINDFile, panIndexNo[iField]);
+                nStatus =
+                    poDATFile->WriteLogicalField(GetFieldAsInteger(iField) == 1,
+                                                 poINDFile, panIndexNo[iField]);
                 break;
             case TABFDate:
 #ifdef MITAB_USE_OFTDATETIME
@@ -855,14 +841,14 @@ int TABFeature::WriteGeometryToMAPFile(
  **********************************************************************/
 void TABFeature::DumpMID(FILE *fpOut /*=NULL*/)
 {
-    OGRFeatureDefn *l_poDefn = GetDefnRef();
+    const OGRFeatureDefn *l_poDefn = GetDefnRef();
 
     if (fpOut == nullptr)
         fpOut = stdout;
 
-    for (int iField = 0; iField < GetFieldCount(); iField++)
+    for (int iField = 0; iField < l_poDefn->GetFieldCount(); iField++)
     {
-        OGRFieldDefn *poFDefn = l_poDefn->GetFieldDefn(iField);
+        const OGRFieldDefn *poFDefn = l_poDefn->GetFieldDefn(iField);
 
         fprintf(fpOut, "  %s (%s) = %s\n", poFDefn->GetNameRef(),
                 OGRFieldDefn::GetFieldTypeName(poFDefn->GetType()),
@@ -899,7 +885,7 @@ void TABFeature::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABPoint::TABPoint(OGRFeatureDefn *poDefnIn) : TABFeature(poDefnIn)
+TABPoint::TABPoint(const OGRFeatureDefn *poDefnIn) : TABFeature(poDefnIn)
 {
 }
 
@@ -920,7 +906,7 @@ TABPoint::~TABPoint()
  * This method calls the generic TABFeature::CloneTABFeature() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABPoint::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *TABPoint::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -1249,7 +1235,7 @@ void TABPoint::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABFontPoint::TABFontPoint(OGRFeatureDefn *poDefnIn)
+TABFontPoint::TABFontPoint(const OGRFeatureDefn *poDefnIn)
     : TABPoint(poDefnIn), m_dAngle(0.0), m_nFontStyle(0)
 {
 }
@@ -1271,7 +1257,8 @@ TABFontPoint::~TABFontPoint()
  * This method calls the generic TABFeature::CloneTABFeature() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABFontPoint::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABFontPoint::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -1610,7 +1597,7 @@ void TABFontPoint::SetSymbolFromStyle(OGRStyleSymbol *poSymbolStyle)
  *
  * Constructor.
  **********************************************************************/
-TABCustomPoint::TABCustomPoint(OGRFeatureDefn *poDefnIn)
+TABCustomPoint::TABCustomPoint(const OGRFeatureDefn *poDefnIn)
     : TABPoint(poDefnIn), m_nCustomStyle(0), m_nUnknown_(0)
 {
 }
@@ -1632,7 +1619,8 @@ TABCustomPoint::~TABCustomPoint()
  * This method calls the generic TABFeature::CloneTABFeature() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABCustomPoint::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABCustomPoint::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -1812,14 +1800,15 @@ const char *TABCustomPoint::GetSymbolStyleString(double dfAngle) const
 
     int nAngle = static_cast<int>(dfAngle);
     const char *pszStyle;
-    const char *pszExt = CPLGetExtension(GetSymbolNameRef());
+    const std::string osExt = CPLGetExtensionSafe(GetSymbolNameRef());
     char szLowerExt[8] = "";
-    const char *pszPtr = pszExt;
+    const char *pszPtr = osExt.c_str();
     int i;
 
     for (i = 0; i < 7 && *pszPtr != '\0' && *pszPtr != ' '; i++, pszPtr++)
     {
-        szLowerExt[i] = static_cast<char>(tolower(*pszPtr));
+        szLowerExt[i] =
+            static_cast<char>(CPLTolower(static_cast<unsigned char>(*pszPtr)));
     }
     szLowerExt[i] = '\0';
 
@@ -1895,7 +1884,7 @@ const char *TABCustomPoint::GetStyleString() const
  *
  * Constructor.
  **********************************************************************/
-TABPolyline::TABPolyline(OGRFeatureDefn *poDefnIn)
+TABPolyline::TABPolyline(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_bCenterIsSet(FALSE), m_dCenterX(0.0),
       m_dCenterY(0.0), m_bWriteTwoPointLineAsPolyline(FALSE), m_bSmooth(FALSE)
 {
@@ -1918,7 +1907,8 @@ TABPolyline::~TABPolyline()
  * This method calls the generic TABFeature::CloneTABFeature() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABPolyline::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABPolyline::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -2984,7 +2974,7 @@ void TABPolyline::TwoPointLineAsPolyline(GBool bTwoPointLineAsPolyline)
  *
  * Constructor.
  **********************************************************************/
-TABRegion::TABRegion(OGRFeatureDefn *poDefnIn)
+TABRegion::TABRegion(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_bSmooth(FALSE), m_bCenterIsSet(FALSE),
       m_dCenterX(0.0), m_dCenterY(0.0)
 {
@@ -3007,7 +2997,8 @@ TABRegion::~TABRegion()
  * This method calls the generic TABFeature::CopyTABFeatureBase() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABRegion::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABRegion::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -3434,7 +3425,7 @@ int TABRegion::WriteGeometryToMAPFile(
          * to write the coordinates themselves...
          *------------------------------------------------------------*/
 
-        GInt32 nX, nY;
+        GInt32 nX = 0, nY = 0;
         for (int iRing = 0; iRing < numRingsTotal; iRing++)
         {
             OGRLinearRing *poRing = GetRingRef(iRing);
@@ -3973,7 +3964,7 @@ void TABRegion::SetCenter(double dX, double dY)
  *
  * Constructor.
  **********************************************************************/
-TABRectangle::TABRectangle(OGRFeatureDefn *poDefnIn)
+TABRectangle::TABRectangle(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_bRoundCorners(FALSE), m_dRoundXRadius(0.0),
       m_dRoundYRadius(0.0)
 {
@@ -3996,7 +3987,8 @@ TABRectangle::~TABRectangle()
  * This method calls the generic TABFeature::CopyTABFeatureBase() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABRectangle::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABRectangle::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -4430,7 +4422,7 @@ void TABRectangle::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABEllipse::TABEllipse(OGRFeatureDefn *poDefnIn)
+TABEllipse::TABEllipse(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_dCenterX(0.0), m_dCenterY(0.0), m_dXRadius(0.0),
       m_dYRadius(0.0)
 {
@@ -4453,7 +4445,8 @@ TABEllipse::~TABEllipse()
  * This method calls the generic TABFeature::CopyTABFeatureBase() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABEllipse::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABEllipse::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -4838,7 +4831,7 @@ void TABEllipse::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABArc::TABArc(OGRFeatureDefn *poDefnIn)
+TABArc::TABArc(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_dStartAngle(0.0), m_dEndAngle(0.0),
       m_dCenterX(0.0), m_dCenterY(0.0), m_dXRadius(0.0), m_dYRadius(0.0)
 {
@@ -4861,7 +4854,7 @@ TABArc::~TABArc()
  * This method calls the generic TABFeature::CopyTABFeatureBase() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABArc::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *TABArc::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -5349,7 +5342,7 @@ void TABArc::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABText::TABText(OGRFeatureDefn *poDefnIn)
+TABText::TABText(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_pszString(nullptr), m_dAngle(0.0), m_dHeight(0.0),
       m_dWidth(0.0), m_dfLineEndX(0.0), m_dfLineEndY(0.0), m_bLineEndSet(FALSE),
       m_rgbForeground(0x000000), m_rgbBackground(0xffffff),
@@ -5376,7 +5369,7 @@ TABText::~TABText()
  * This method calls the generic TABFeature::CopyTABFeatureBase() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABText::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *TABText::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -6311,8 +6304,9 @@ const char *TABText::GetLabelStyleString() const
 
     if (QueryFontStyle(TABFSAllCaps))
         for (int i = 0; pszTextString[i]; ++i)
-            if (isalpha(pszTextString[i]))
-                pszTextString[i] = static_cast<char>(toupper(pszTextString[i]));
+            if (isalpha(static_cast<unsigned char>(pszTextString[i])))
+                pszTextString[i] = static_cast<char>(
+                    CPLToupper(static_cast<unsigned char>(pszTextString[i])));
 
     /* Escape the double quote chars and expand the text */
     char *pszTmpTextString = nullptr;
@@ -6390,7 +6384,7 @@ const char *TABText::GetStyleString() const
 void TABText::SetLabelFromStyleString(const char *pszStyleString)
 {
     // Use the Style Manager to retrieve all the information we need.
-    auto poStyleMgr = cpl::make_unique<OGRStyleMgr>(nullptr);
+    auto poStyleMgr = std::make_unique<OGRStyleMgr>(nullptr);
     std::unique_ptr<OGRStyleTool> poStylePart;
 
     // Init the StyleMgr with the StyleString.
@@ -6612,7 +6606,7 @@ void TABText::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABMultiPoint::TABMultiPoint(OGRFeatureDefn *poDefnIn)
+TABMultiPoint::TABMultiPoint(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_bCenterIsSet(FALSE), m_dCenterX(0.0),
       m_dCenterY(0.0)
 {
@@ -6635,7 +6629,8 @@ TABMultiPoint::~TABMultiPoint()
  * This method calls the generic TABFeature::CloneTABFeature() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABMultiPoint::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABMultiPoint::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -7151,7 +7146,7 @@ void TABMultiPoint::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABCollection::TABCollection(OGRFeatureDefn *poDefnIn)
+TABCollection::TABCollection(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_poRegion(nullptr), m_poPline(nullptr),
       m_poMpoint(nullptr)
 {
@@ -7205,7 +7200,8 @@ void TABCollection::EmptyCollection()
  * This method calls the generic TABFeature::CloneTABFeature() and
  * then copies any members specific to its own type.
  **********************************************************************/
-TABFeature *TABCollection::CloneTABFeature(OGRFeatureDefn *poNewDefn /*=NULL*/)
+TABFeature *
+TABCollection::CloneTABFeature(const OGRFeatureDefn *poNewDefn /*=NULL*/)
 {
     /*-----------------------------------------------------------------
      * Alloc new feature and copy the base stuff
@@ -8279,7 +8275,7 @@ void TABCollection::DumpMIF(FILE *fpOut /*=NULL*/)
  *
  * Constructor.
  **********************************************************************/
-TABDebugFeature::TABDebugFeature(OGRFeatureDefn *poDefnIn)
+TABDebugFeature::TABDebugFeature(const OGRFeatureDefn *poDefnIn)
     : TABFeature(poDefnIn), m_nSize(0), m_nCoordDataPtr(0), m_nCoordDataSize(0)
 {
     memset(m_abyBuf, 0, sizeof(m_abyBuf));
@@ -8403,11 +8399,18 @@ void TABDebugFeature::DumpMIF(FILE *fpOut /*=NULL*/)
  **********************************************************************/
 
 // MI default is PEN(1, 2, 0)
-static const TABPenDef csDefaultPen = MITAB_PEN_DEFAULT;
+static const TABPenDef MITABcsDefaultPen = MITAB_PEN_DEFAULT;
 
-ITABFeaturePen::ITABFeaturePen() : m_nPenDefIndex(-1), m_sPenDef(csDefaultPen)
+ITABFeaturePen::ITABFeaturePen()
+    : m_nPenDefIndex(-1), m_sPenDef(MITABcsDefaultPen)
 {
 }
+
+/**********************************************************************
+ *                   ITABFeaturePen::~ITABFeaturePen()
+ **********************************************************************/
+
+ITABFeaturePen::~ITABFeaturePen() = default;
 
 /**********************************************************************
  *                   ITABFeaturePen::GetPenWidthPixel()
@@ -8615,11 +8618,10 @@ const char *ITABFeaturePen::GetPenStyleString() const
     if (strlen(szPattern) != 0)
     {
         if (m_sPenDef.nPointWidth > 0)
-            pszStyle = CPLSPrintf("PEN(w:%dpt,c:#%6.6x,id:\"mapinfo-pen-%d,"
+            pszStyle = CPLSPrintf("PEN(w:%.1fpt,c:#%6.6x,id:\"mapinfo-pen-%d,"
                                   "ogr-pen-%d\",p:\"%spx\",cap:r,j:r)",
-                                  static_cast<int>(GetPenWidthPoint()),
-                                  m_sPenDef.rgbColor, GetPenPattern(),
-                                  nOGRStyle, szPattern);
+                                  GetPenWidthPoint(), m_sPenDef.rgbColor,
+                                  GetPenPattern(), nOGRStyle, szPattern);
         else
             pszStyle = CPLSPrintf("PEN(w:%dpx,c:#%6.6x,id:\"mapinfo-pen-%d,"
                                   "ogr-pen-%d\",p:\"%spx\",cap:r,j:r)",
@@ -8629,11 +8631,10 @@ const char *ITABFeaturePen::GetPenStyleString() const
     else
     {
         if (m_sPenDef.nPointWidth > 0)
-            pszStyle =
-                CPLSPrintf("PEN(w:%dpt,c:#%6.6x,id:\""
-                           "mapinfo-pen-%d,ogr-pen-%d\",cap:r,j:r)",
-                           static_cast<int>(GetPenWidthPoint()),
-                           m_sPenDef.rgbColor, GetPenPattern(), nOGRStyle);
+            pszStyle = CPLSPrintf("PEN(w:%.1fpt,c:#%6.6x,id:\""
+                                  "mapinfo-pen-%d,ogr-pen-%d\",cap:r,j:r)",
+                                  GetPenWidthPoint(), m_sPenDef.rgbColor,
+                                  GetPenPattern(), nOGRStyle);
         else
             pszStyle = CPLSPrintf("PEN(w:%dpx,c:#%6.6x,id:\""
                                   "mapinfo-pen-%d,ogr-pen-%d\",cap:r,j:r)",
@@ -8688,15 +8689,7 @@ void ITABFeaturePen::SetPenFromStyleString(const char *pszStyleString)
 
     OGRStylePen *poPenStyle = cpl::down_cast<OGRStylePen *>(poStylePart);
 
-    // With Pen, we always want to output points or pixels (which are the same,
-    // so just use points).
-    //
-    // It's very important to set the output unit of the feature.
-    // The default value is meter. If we don't do it all numerical values
-    // will be assumed to be converted from the input unit to meter when we
-    // will get them via GetParam...() functions.
-    // See OGRStyleTool::Parse() for more details.
-    poPenStyle->SetUnit(OGRSTUPoints, 1);
+    // With Pen, we always want to output points or pixels
 
     // Get the Pen Id or pattern
     const char *pszPenName = poPenStyle->Id(bIsNull);
@@ -8704,14 +8697,26 @@ void ITABFeaturePen::SetPenFromStyleString(const char *pszStyleString)
         pszPenName = nullptr;
 
     // Set the width
-    if (poPenStyle->Width(bIsNull) != 0.0)
+    OGRSTUnitId ePenWidthUnit = OGRSTUGround;
+    // Respect the original unit if it is points vs pixel. Otherwise convert
+    // to points.
+    const double dfPenWidth = poPenStyle->RawWidth(ePenWidthUnit, bIsNull);
+    if (dfPenWidth != 0.0)
     {
-        const double nPenWidth = poPenStyle->Width(bIsNull);
-        // Width < 10 is a pixel
-        if (nPenWidth > 10)
-            SetPenWidthPoint(nPenWidth);
+        if (ePenWidthUnit == OGRSTUPoints)
+        {
+            SetPenWidthPoint(dfPenWidth);
+        }
+        else if (ePenWidthUnit == OGRSTUPixel)
+        {
+            SetPenWidthPixel(
+                static_cast<GByte>(std::clamp(dfPenWidth + 0.5, 0.0, 255.0)));
+        }
         else
-            SetPenWidthPixel(static_cast<GByte>(nPenWidth));
+        {
+            poPenStyle->SetUnit(OGRSTUPoints, 1);
+            SetPenWidthPoint(poPenStyle->Width(bIsNull));
+        }
     }
 
     // Set the color
@@ -8843,12 +8848,18 @@ void ITABFeaturePen::DumpPenDef(FILE *fpOut /*=NULL*/)
  **********************************************************************/
 
 // MI default is BRUSH(2, 16777215, 16777215)
-static const TABBrushDef csDefaultBrush = MITAB_BRUSH_DEFAULT;
+static const TABBrushDef MITABcsDefaultBrush = MITAB_BRUSH_DEFAULT;
 
 ITABFeatureBrush::ITABFeatureBrush()
-    : m_nBrushDefIndex(-1), m_sBrushDef(csDefaultBrush)
+    : m_nBrushDefIndex(-1), m_sBrushDef(MITABcsDefaultBrush)
 {
 }
+
+/**********************************************************************
+ *                   ITABFeatureBrush::~ITABFeatureBrush()
+ **********************************************************************/
+
+ITABFeatureBrush::~ITABFeatureBrush() = default;
 
 /**********************************************************************
  *                   ITABFeatureBrush::GetBrushStyleString()
@@ -9062,12 +9073,18 @@ void ITABFeatureBrush::DumpBrushDef(FILE *fpOut /*=NULL*/)
  **********************************************************************/
 
 // MI default is Font("Arial", 0, 0, 0)
-static const TABFontDef csDefaultFont = MITAB_FONT_DEFAULT;
+static const TABFontDef MITABcsDefaultFont = MITAB_FONT_DEFAULT;
 
 ITABFeatureFont::ITABFeatureFont()
-    : m_nFontDefIndex(-1), m_sFontDef(csDefaultFont)
+    : m_nFontDefIndex(-1), m_sFontDef(MITABcsDefaultFont)
 {
 }
+
+/**********************************************************************
+ *                   ITABFeatureFont::~ITABFeatureFont()
+ **********************************************************************/
+
+ITABFeatureFont::~ITABFeatureFont() = default;
 
 /**********************************************************************
  *                   ITABFeatureFont::SetFontName()
@@ -9104,10 +9121,10 @@ void ITABFeatureFont::DumpFontDef(FILE *fpOut /*=NULL*/)
  **********************************************************************/
 
 // MI default is Symbol(35, 0, 12)
-static const TABSymbolDef csDefaultSymbol = MITAB_SYMBOL_DEFAULT;
+static const TABSymbolDef MITABcsDefaultSymbol = MITAB_SYMBOL_DEFAULT;
 
 ITABFeatureSymbol::ITABFeatureSymbol()
-    : m_nSymbolDefIndex(-1), m_sSymbolDef(csDefaultSymbol)
+    : m_nSymbolDefIndex(-1), m_sSymbolDef(MITABcsDefaultSymbol)
 {
 }
 

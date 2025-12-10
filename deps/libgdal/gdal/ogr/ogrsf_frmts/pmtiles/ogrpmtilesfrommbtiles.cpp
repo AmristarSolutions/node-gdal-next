@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2023, Planet Labs
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_json.h"
@@ -82,7 +66,7 @@ static bool ProcessMetadata(GDALDataset *poSQLiteDS, pmtiles::headerv3 &sHeader,
                          "Cannot parse 'json' metadata item");
                 return false;
             }
-            for (auto &oChild : oJsonDoc.GetRoot().GetChildren())
+            for (const auto &oChild : oJsonDoc.GetRoot().GetChildren())
             {
                 oObj.Add(oChild.GetName(), oChild);
             }
@@ -346,7 +330,7 @@ bool OGRPMTilesConvertFromMBTiles(const char *pszDestName,
     std::string osTmpFile(std::string(pszDestName) + ".tmp");
     if (!VSIIsLocal(pszDestName))
     {
-        osTmpFile = CPLGenerateTempFilename(CPLGetFilename(pszDestName));
+        osTmpFile = CPLGenerateTempFilenameSafe(CPLGetFilename(pszDestName));
     }
 
     auto poTmpFile =
@@ -376,6 +360,7 @@ bool OGRPMTilesConvertFromMBTiles(const char *pszDestName,
             VSIUnlink(m_osFilename.c_str());
         }
     };
+
     ResetAndUnlinkTmpFile oReseer(poTmpFile, osTmpFile);
 
     std::vector<pmtiles::entryv3> asPMTilesEntries;
@@ -467,6 +452,7 @@ bool OGRPMTilesConvertFromMBTiles(const char *pszDestName,
     const CPLCompressor *psCompressor = CPLGetCompressor("gzip");
     assert(psCompressor);
     std::string osCompressed;
+
     struct compression_exception : std::exception
     {
         const char *what() const noexcept override
@@ -475,8 +461,9 @@ bool OGRPMTilesConvertFromMBTiles(const char *pszDestName,
         }
     };
 
-    const auto oCompressFunc =
-        [psCompressor, &osCompressed](const std::string &osBytes, uint8_t)
+    const auto oCompressFunc = [psCompressor,
+                                &osCompressed](const std::string &osBytes,
+                                               uint8_t) -> std::string
     {
         osCompressed.resize(32 + osBytes.size() * 2);
         size_t nOutputSize = osCompressed.size();

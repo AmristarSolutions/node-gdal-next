@@ -31,11 +31,6 @@ This module defines the following variables:
   The version of Spatialite found.
 #]=======================================================================]
 
-if(CMAKE_VERSION VERSION_LESS 3.13)
-    set(SPATIALITE_ROOT CACHE PATH "")
-    mark_as_advanced(SPATIALITE_ROOT)
-endif()
-
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)
     pkg_check_modules(PC_SPATIALITE QUIET spatialite)
@@ -48,6 +43,7 @@ find_path(SPATIALITE_INCLUDE_DIR
           PATH_SUFFIXES include)
 find_library(SPATIALITE_LIBRARY
              NAMES spatialite_i spatialite
+             NAMES_PER_DIR
              HINTS ${SPATIALITE_ROOT} ${PC_SPATIALITE_LIBRARY_DIRS}
              PATH_SUFFIXES lib)
 mark_as_advanced(SPATIALITE_LIBRARY SPATIALITE_INCLUDE_DIR)

@@ -8,37 +8,28 @@
  * Copyright (c) 2013, Paul Ramsey <pramsey@boundlessgeo.com>
  * Copyright (c) 2014, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_geopackage.h"
 #include "ogrgeopackageutility.h"
+#include "ogrlayerarrow.h"
 #include "ogrsqliteutility.h"
 #include "cpl_md5.h"
+#include "cpl_multiproc.h"  // CPLSleep()
 #include "cpl_time.h"
 #include "ogr_p.h"
 #include "sqlite_rtree_bulk_load/wrapper.h"
+#include "gdal_priv_templates.hpp"
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
+#include <cinttypes>
+#include <climits>
 #include <cmath>
 #include <limits>
+#include <mutex>
 
 #undef SQLITE_STATIC
 #define SQLITE_STATIC static_cast<sqlite3_destructor_type>(nullptr)
@@ -66,8 +57,8 @@ OGRErr OGRGeoPackageTableLayer::SaveExtent()
 
     char *pszSQL =
         sqlite3_mprintf("UPDATE gpkg_contents SET "
-                        "min_x = %.18g, min_y = %.18g, "
-                        "max_x = %.18g, max_y = %.18g "
+                        "min_x = %.17g, min_y = %.17g, "
+                        "max_x = %.17g, max_y = %.17g "
                         "WHERE lower(table_name) = lower('%q') AND "
                         "Lower(data_type) = 'features'",
                         m_poExtent->MinX, m_poExtent->MinY, m_poExtent->MaxX,
@@ -122,7 +113,7 @@ OGRErr OGRGeoPackageTableLayer::UpdateExtent(const OGREnvelope *poExtent)
 {
     if (!m_poExtent)
     {
-        m_poExtent = new OGREnvelope(*poExtent);
+        m_poExtent = std::make_unique<OGREnvelope>(*poExtent);
     }
     m_poExtent->Merge(*poExtent);
     m_bExtentChanged = true;
@@ -137,6 +128,12 @@ OGRErr OGRGeoPackageTableLayer::UpdateExtent(const OGREnvelope *poExtent)
 //
 OGRErr OGRGeoPackageTableLayer::BuildColumns()
 {
+    if (m_bDeferredCreation && RunDeferredCreationIfNecessary() != OGRERR_NONE)
+        return OGRERR_FAILURE;
+
+    if (!m_bFeatureDefnCompleted)
+        GetLayerDefn();
+
     m_anFieldOrdinals.resize(m_poFeatureDefn->GetFieldCount());
     int iCurCol = 0;
 
@@ -197,7 +194,7 @@ OGRErr OGRGeoPackageTableLayer::BuildColumns()
         // Can happen if ignoring all fields on a view...
         soColumns = "NULL";
     }
-    m_soColumns = soColumns;
+    m_soColumns = std::move(soColumns);
     return OGRERR_NONE;
 }
 
@@ -219,7 +216,7 @@ OGRErr OGRGeoPackageTableLayer::FeatureBindParameters(
     const int *panUpdatedFieldsIdx, int nUpdatedGeomFieldsCount,
     const int * /*panUpdatedGeomFieldsIdx*/)
 {
-    OGRFeatureDefn *poFeatureDefn = poFeature->GetDefnRef();
+    const OGRFeatureDefn *poFeatureDefn = poFeature->GetDefnRef();
 
     int nColCount = 1;
     if (bAddFID)
@@ -248,7 +245,8 @@ OGRErr OGRGeoPackageTableLayer::FeatureBindParameters(
         if (poGeom)
         {
             size_t szWkb = 0;
-            GByte *pabyWkb = GPkgGeometryFromOGR(poGeom, m_iSrs, &szWkb);
+            GByte *pabyWkb = GPkgGeometryFromOGR(poGeom, m_iSrs,
+                                                 &m_sBinaryPrecision, &szWkb);
             if (!pabyWkb)
                 return OGRERR_FAILURE;
             int err = sqlite3_bind_blob(poStmt, nColCount++, pabyWkb,
@@ -296,8 +294,9 @@ OGRErr OGRGeoPackageTableLayer::FeatureBindParameters(
     {
         const int iField =
             nUpdatedFieldsCount < 0 ? idx : panUpdatedFieldsIdx[idx];
-        if (iField == m_iFIDAsRegularColumnIndex ||
-            m_abGeneratedColumns[iField])
+        assert(iField >= 0);
+        const auto &oFieldDefn = poFeatureDefn->GetFieldDefn(iField);
+        if (iField == m_iFIDAsRegularColumnIndex || oFieldDefn->IsGenerated())
             continue;
         if (!poFeature->IsFieldSetUnsafe(iField))
         {
@@ -356,6 +355,7 @@ OGRErr OGRGeoPackageTableLayer::FeatureBindParameters(
                 default:
                 {
                     const char *pszVal = "";
+                    CPL_IGNORE_RET_VAL(pszVal);  // Make CSA happy
                     int nValLengthBytes = -1;
                     sqlite3_destructor_type destructorType = SQLITE_TRANSIENT;
                     if (eType == OFTDate)
@@ -476,22 +476,24 @@ OGRErr OGRGeoPackageTableLayer::FeatureBindParameters(
                                 }
                             }
 
-                            if (CPLStrlenUTF8(pszVal) > poFieldDefn->GetWidth())
+                            if (CPLStrlenUTF8Ex(pszVal) >
+                                static_cast<size_t>(poFieldDefn->GetWidth()))
                             {
-                                CPLError(
-                                    CE_Warning, CPLE_AppDefined,
-                                    "Value of field '%s' has %d characters, "
-                                    "whereas maximum allowed is %d.%s",
-                                    poFeatureDefn->GetFieldDefn(iField)
-                                        ->GetNameRef(),
-                                    CPLStrlenUTF8(pszVal),
-                                    poFieldDefn->GetWidth(),
-                                    m_bTruncateFields
-                                        ? " Value will be truncated."
-                                        : "");
+                                CPLError(CE_Warning, CPLE_AppDefined,
+                                         "Value of field '%s' has %" PRIu64
+                                         " characters, "
+                                         "whereas maximum allowed is %d.%s",
+                                         poFeatureDefn->GetFieldDefn(iField)
+                                             ->GetNameRef(),
+                                         static_cast<uint64_t>(
+                                             CPLStrlenUTF8Ex(pszVal)),
+                                         poFieldDefn->GetWidth(),
+                                         m_bTruncateFields
+                                             ? " Value will be truncated."
+                                             : "");
                                 if (m_bTruncateFields)
                                 {
-                                    int countUTF8Chars = 0;
+                                    size_t countUTF8Chars = 0;
                                     nValLengthBytes = 0;
                                     while (pszVal[nValLengthBytes])
                                     {
@@ -502,8 +504,11 @@ OGRErr OGRGeoPackageTableLayer::FeatureBindParameters(
                                             // character just beyond the maximum
                                             // accepted
                                             if (countUTF8Chars ==
-                                                poFieldDefn->GetWidth())
+                                                static_cast<size_t>(
+                                                    poFieldDefn->GetWidth()))
+                                            {
                                                 break;
+                                            }
                                             countUTF8Chars++;
                                         }
                                         nValLengthBytes++;
@@ -571,8 +576,8 @@ OGRGeoPackageTableLayer::FeatureBindUpdateParameters(OGRFeature *poFeature,
     if (sqlite_err != SQLITE_OK)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
-                 "failed to bind FID '" CPL_FRMT_GIB "' to statement",
-                 poFeature->GetFID());
+                 "failed to bind FID '" CPL_FRMT_GIB "' to statement: %s",
+                 poFeature->GetFID(), sqlite3_errmsg(m_poDS->GetDB()));
         return OGRERR_FAILURE;
     }
 
@@ -610,7 +615,7 @@ CPLString OGRGeoPackageTableLayer::FeatureGenerateInsertSQL(
     const std::string &osUpsertUniqueColumnName)
 {
     bool bNeedComma = false;
-    OGRFeatureDefn *poFeatureDefn = poFeature->GetDefnRef();
+    const OGRFeatureDefn *poFeatureDefn = poFeature->GetDefnRef();
 
     if (poFeatureDefn->GetFieldCount() ==
             ((m_iFIDAsRegularColumnIndex >= 0) ? 1 : 0) &&
@@ -658,7 +663,8 @@ CPLString OGRGeoPackageTableLayer::FeatureGenerateInsertSQL(
     /* Add attribute column names (except FID) to the SQL */
     for (int i = 0; i < poFeatureDefn->GetFieldCount(); i++)
     {
-        if (i == m_iFIDAsRegularColumnIndex || m_abGeneratedColumns[i])
+        const auto &oFieldDefn = poFeatureDefn->GetFieldDefn(i);
+        if (i == m_iFIDAsRegularColumnIndex || oFieldDefn->IsGenerated())
             continue;
         if (!bBindUnsetFields && !poFeature->IsFieldSet(i))
             continue;
@@ -775,7 +781,8 @@ std::string OGRGeoPackageTableLayer::FeatureGenerateUpdateSQL(
     const int nFieldCount = poFeatureDefn->GetFieldCount();
     for (int i = 0; i < nFieldCount; i++)
     {
-        if (i == m_iFIDAsRegularColumnIndex || m_abGeneratedColumns[i])
+        const auto &oFieldDefn = poFeatureDefn->GetFieldDefn(i);
+        if (i == m_iFIDAsRegularColumnIndex || oFieldDefn->IsGenerated())
             continue;
         if (!poFeature->IsFieldSet(i))
             continue;
@@ -802,12 +809,13 @@ std::string OGRGeoPackageTableLayer::FeatureGenerateUpdateSQL(
 /*                            GetLayerDefn()                            */
 /************************************************************************/
 
-OGRFeatureDefn *OGRGeoPackageTableLayer::GetLayerDefn()
+const OGRFeatureDefn *OGRGeoPackageTableLayer::GetLayerDefn() const
 {
     if (!m_bFeatureDefnCompleted)
     {
         m_bFeatureDefnCompleted = true;
-        ReadTableDefinition();
+        const_cast<OGRGeoPackageTableLayer *>(this)->ReadTableDefinition();
+        m_poFeatureDefn->Seal(/* bSealFields = */ true);
     }
     return m_poFeatureDefn;
 }
@@ -816,7 +824,7 @@ OGRFeatureDefn *OGRGeoPackageTableLayer::GetLayerDefn()
 /*                      GetFIDColumn()                                  */
 /************************************************************************/
 
-const char *OGRGeoPackageTableLayer::GetFIDColumn()
+const char *OGRGeoPackageTableLayer::GetFIDColumn() const
 {
     if (!m_bFeatureDefnCompleted)
         GetLayerDefn();
@@ -827,7 +835,7 @@ const char *OGRGeoPackageTableLayer::GetFIDColumn()
 /*                            GetGeomType()                             */
 /************************************************************************/
 
-OGRwkbGeometryType OGRGeoPackageTableLayer::GetGeomType()
+OGRwkbGeometryType OGRGeoPackageTableLayer::GetGeomType() const
 {
     return m_poFeatureDefn->GetGeomType();
 }
@@ -836,7 +844,7 @@ OGRwkbGeometryType OGRGeoPackageTableLayer::GetGeomType()
 /*                         GetGeometryColumn()                          */
 /************************************************************************/
 
-const char *OGRGeoPackageTableLayer::GetGeometryColumn()
+const char *OGRGeoPackageTableLayer::GetGeometryColumn() const
 
 {
     if (m_poFeatureDefn->GetGeomFieldCount() > 0)
@@ -875,8 +883,8 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
             CPLSPrintf("trigger_delete_feature_count_%s", m_pszTableName));
         const std::map<CPLString, CPLString> &oMap =
             m_poDS->GetNameTypeMapFromSQliteMaster();
-        if (oMap.find(osTrigger1Name.toupper()) != oMap.end() &&
-            oMap.find(osTrigger2Name.toupper()) != oMap.end())
+        if (cpl::contains(oMap, osTrigger1Name.toupper()) &&
+            cpl::contains(oMap, osTrigger2Name.toupper()))
         {
             m_bOGRFeatureCountTriggersEnabled = true;
         }
@@ -922,7 +930,8 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
             const char *pszFeatureCount = oResultFeatureCount->GetValue(0, 0);
             if (pszFeatureCount)
             {
-                m_nTotalFeatureCount = CPLAtoGIntBig(pszFeatureCount);
+                m_nTotalFeatureCount =
+                    std::max<GIntBig>(0, CPLAtoGIntBig(pszFeatureCount));
             }
         }
     }
@@ -937,7 +946,7 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
         /* Check that the table name is registered in gpkg_contents */
         const std::map<CPLString, GPKGContentsDesc> &oMapContents =
             m_poDS->GetContents();
-        std::map<CPLString, GPKGContentsDesc>::const_iterator oIterContents =
+        const auto oIterContents =
             oMapContents.find(CPLString(m_pszTableName).toupper());
         if (oIterContents == oMapContents.end())
         {
@@ -1089,13 +1098,7 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
     /*  #|name|type|notnull|default|pk */
     /*  0|id|integer|0||1 */
     /*  1|name|varchar|0||0 */
-#if SQLITE_VERSION_NUMBER >= 3026000L
-    // SQLite 3.26 or later has table_xinfo() with an extra column to indicate
-    // hidden layers
     char *pszSQL = sqlite3_mprintf("pragma table_xinfo('%q')", m_pszTableName);
-#else
-    char *pszSQL = sqlite3_mprintf("pragma table_info('%q')", m_pszTableName);
-#endif
     auto oResultTable = SQLQuery(poDb, pszSQL);
     sqlite3_free(pszSQL);
 
@@ -1125,7 +1128,6 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
                  m_pszTableName);
     }
 
-    m_abGeneratedColumns.resize(oResultTable->RowCount());
     for (int iRecord = 0; iRecord < oResultTable->RowCount(); iRecord++)
     {
         const char *pszName = oResultTable->GetValue(1, iRecord);
@@ -1133,9 +1135,7 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
         int bNotNull = oResultTable->GetValueAsInteger(3, iRecord);
         const char *pszDefault = oResultTable->GetValue(4, iRecord);
         int nPKIDIndex = oResultTable->GetValueAsInteger(5, iRecord);
-#if SQLITE_VERSION_NUMBER >= 3026000L
         int nHiddenValue = oResultTable->GetValueAsInteger(6, iRecord);
-#endif
 
         OGRFieldSubType eSubType = OFSTNone;
         int nMaxWidth = 0;
@@ -1153,7 +1153,6 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
             bIsGenerated = true;
             osType.resize(osType.size() - strlen(GENERATED_ALWAYS_SUFFIX));
         }
-#if SQLITE_VERSION_NUMBER >= 3026000L
         constexpr int GENERATED_VIRTUAL = 2;
         constexpr int GENERATED_STORED = 3;
         if (nHiddenValue == GENERATED_VIRTUAL ||
@@ -1161,7 +1160,6 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
         {
             bIsGenerated = true;
         }
-#endif
 
         if (!osType.empty() || m_bIsTable)
         {
@@ -1224,12 +1222,11 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
                             FALSE);
 
                     /* Read the SRS */
-                    OGRSpatialReference *poSRS = m_poDS->GetSpatialRef(m_iSrs);
+                    auto poSRS = m_poDS->GetSpatialRef(m_iSrs);
                     if (poSRS)
                     {
                         m_poFeatureDefn->GetGeomFieldDefn(0)->SetSpatialRef(
-                            poSRS);
-                        poSRS->Dereference();
+                            poSRS.get());
                     }
                 }
                 else if (!STARTS_WITH(
@@ -1274,8 +1271,7 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
                 if (bNotNull)
                     oField.SetNullable(FALSE);
 
-                if (uniqueFieldsUC.find(CPLString(pszName).toupper()) !=
-                    uniqueFieldsUC.end())
+                if (cpl::contains(uniqueFieldsUC, CPLString(pszName).toupper()))
                 {
                     oField.SetUnique(TRUE);
                 }
@@ -1339,14 +1335,11 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
                         oField.SetDefault(pszDefault);
                     }
                 }
-                m_abGeneratedColumns[m_poFeatureDefn->GetFieldCount()] =
-                    bIsGenerated;
+                oField.SetGenerated(bIsGenerated);
                 m_poFeatureDefn->AddFieldDefn(&oField);
             }
         }
     }
-
-    m_abGeneratedColumns.resize(m_poFeatureDefn->GetFieldCount());
 
     /* Wait, we didn't find a FID? Some operations will not be possible */
     if (m_bIsTable && m_pszFidColumn == nullptr)
@@ -1357,7 +1350,7 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
 
     if (bReadExtent)
     {
-        m_poExtent = new OGREnvelope(oExtent);
+        m_poExtent = std::make_unique<OGREnvelope>(oExtent);
     }
 
     // Look for sub-types such as JSON
@@ -1434,6 +1427,72 @@ OGRErr OGRGeoPackageTableLayer::ReadTableDefinition()
         }
     }
 
+    // Look for geometry column coordinate precision in gpkg_metadata
+    if (m_poDS->HasMetadataTables() && m_poFeatureDefn->GetGeomFieldCount() > 0)
+    {
+        pszSQL = sqlite3_mprintf(
+            "SELECT md.metadata, mdr.column_name "
+            "FROM gpkg_metadata md "
+            "JOIN gpkg_metadata_reference mdr ON (md.id = mdr.md_file_id) "
+            "WHERE lower(mdr.table_name) = lower('%q') "
+            "AND md.md_standard_uri = 'http://gdal.org' "
+            "AND md.mime_type = 'text/xml' "
+            "AND mdr.reference_scope = 'column' "
+            "AND md.metadata LIKE '<CoordinatePrecision%%' "
+            "ORDER BY md.id LIMIT 1000",  // to avoid denial of service
+            m_pszTableName);
+
+        auto oResult = SQLQuery(m_poDS->GetDB(), pszSQL);
+        sqlite3_free(pszSQL);
+
+        for (int i = 0; oResult && i < oResult->RowCount(); i++)
+        {
+            const char *pszMetadata = oResult->GetValue(0, i);
+            const char *pszColumn = oResult->GetValue(1, i);
+            if (pszMetadata && pszColumn)
+            {
+                const int iGeomCol =
+                    m_poFeatureDefn->GetGeomFieldIndex(pszColumn);
+                if (iGeomCol >= 0)
+                {
+                    auto psXMLNode =
+                        CPLXMLTreeCloser(CPLParseXMLString(pszMetadata));
+                    if (psXMLNode)
+                    {
+                        OGRGeomCoordinatePrecision sCoordPrec;
+                        if (const char *pszVal = CPLGetXMLValue(
+                                psXMLNode.get(), "xy_resolution", nullptr))
+                        {
+                            sCoordPrec.dfXYResolution = CPLAtof(pszVal);
+                        }
+                        if (const char *pszVal = CPLGetXMLValue(
+                                psXMLNode.get(), "z_resolution", nullptr))
+                        {
+                            sCoordPrec.dfZResolution = CPLAtof(pszVal);
+                        }
+                        if (const char *pszVal = CPLGetXMLValue(
+                                psXMLNode.get(), "m_resolution", nullptr))
+                        {
+                            sCoordPrec.dfMResolution = CPLAtof(pszVal);
+                        }
+                        m_poFeatureDefn->GetGeomFieldDefn(iGeomCol)
+                            ->SetCoordinatePrecision(sCoordPrec);
+                        if (CPLTestBool(CPLGetXMLValue(
+                                psXMLNode.get(), "discard_coord_lsb", "false")))
+                        {
+                            m_sBinaryPrecision.SetFrom(sCoordPrec);
+                            m_bUndoDiscardCoordLSBOnReading =
+                                CPLTestBool(CPLGetXMLValue(
+                                    psXMLNode.get(),
+                                    "undo_discard_coord_lsb_on_reading",
+                                    "false"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /* Update the columns string */
     BuildColumns();
 
@@ -1472,9 +1531,6 @@ OGRGeoPackageTableLayer::~OGRGeoPackageTableLayer()
     if (m_pszTableName)
         CPLFree(m_pszTableName);
 
-    if (m_poExtent)
-        delete m_poExtent;
-
     if (m_poUpdateStatement)
         sqlite3_finalize(m_poUpdateStatement);
 
@@ -1495,7 +1551,7 @@ void OGRGeoPackageTableLayer::CancelAsyncNextArrowArray()
 {
     if (m_poFillArrowArray)
     {
-        std::lock_guard<std::mutex> oLock(m_poFillArrowArray->oMutex);
+        std::lock_guard oLock(m_poFillArrowArray->oMutex);
         m_poFillArrowArray->nCountRows = -1;
         m_poFillArrowArray->oCV.notify_one();
     }
@@ -1513,7 +1569,7 @@ void OGRGeoPackageTableLayer::CancelAsyncNextArrowArray()
         m_oQueueArrowArrayPrefetchTasks.pop();
 
         {
-            std::lock_guard<std::mutex> oLock(task->m_oMutex);
+            std::lock_guard oLock(task->m_oMutex);
             task->m_bStop = true;
             task->m_oCV.notify_one();
         }
@@ -1665,7 +1721,7 @@ bool OGRGeoPackageTableLayer::CheckUpdatableTable(const char *pszOperation)
 /*                      CreateField()                                   */
 /************************************************************************/
 
-OGRErr OGRGeoPackageTableLayer::CreateField(OGRFieldDefn *poField,
+OGRErr OGRGeoPackageTableLayer::CreateField(const OGRFieldDefn *poField,
                                             int /* bApproxOK */)
 {
     if (!m_bFeatureDefnCompleted)
@@ -1681,8 +1737,31 @@ OGRErr OGRGeoPackageTableLayer::CreateField(OGRFieldDefn *poField,
         oFieldDefn.SetWidth(0);
     oFieldDefn.SetPrecision(0);
 
+    if (m_bLaunder)
+        oFieldDefn.SetName(
+            GDALGeoPackageDataset::LaunderName(oFieldDefn.GetNameRef())
+                .c_str());
+
+    if (m_poFeatureDefn->GetFieldIndex(oFieldDefn.GetNameRef()) >= 0)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "Cannot create field %s. "
+                 "A field with the same name already exists.",
+                 oFieldDefn.GetNameRef());
+        return OGRERR_FAILURE;
+    }
+
+    if (m_poFeatureDefn->GetGeomFieldIndex(oFieldDefn.GetNameRef()) >= 0)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "Cannot create field %s. "
+                 "It has the same name as the geometry field.",
+                 oFieldDefn.GetNameRef());
+        return OGRERR_FAILURE;
+    }
+
     if (m_pszFidColumn != nullptr &&
-        EQUAL(poField->GetNameRef(), m_pszFidColumn) &&
+        EQUAL(oFieldDefn.GetNameRef(), m_pszFidColumn) &&
         poField->GetType() != OFTInteger &&
         poField->GetType() != OFTInteger64 &&
         // typically a GeoPackage exported with QGIS as a shapefile and
@@ -1691,7 +1770,20 @@ OGRErr OGRGeoPackageTableLayer::CreateField(OGRFieldDefn *poField,
           poField->GetPrecision() == 0))
     {
         CPLError(CE_Failure, CPLE_AppDefined, "Wrong field type for %s",
-                 poField->GetNameRef());
+                 oFieldDefn.GetNameRef());
+        return OGRERR_FAILURE;
+    }
+
+    const int nMaxColumns =
+        sqlite3_limit(m_poDS->GetDB(), SQLITE_LIMIT_COLUMN, -1);
+    // + 1 for the FID column
+    if (m_poFeatureDefn->GetFieldCount() +
+            m_poFeatureDefn->GetGeomFieldCount() + 1 >=
+        nMaxColumns)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "Cannot add field %s. Limit of %d columns reached",
+                 oFieldDefn.GetNameRef(), nMaxColumns);
         return OGRERR_FAILURE;
     }
 
@@ -1704,7 +1796,7 @@ OGRErr OGRGeoPackageTableLayer::CreateField(OGRFieldDefn *poField,
 
         osCommand.Printf("ALTER TABLE \"%s\" ADD COLUMN \"%s\" %s",
                          SQLEscapeName(m_pszTableName).c_str(),
-                         SQLEscapeName(poField->GetNameRef()).c_str(),
+                         SQLEscapeName(oFieldDefn.GetNameRef()).c_str(),
                          GPkgFieldFromOGR(poField->GetType(),
                                           poField->GetSubType(), nMaxWidth));
         if (!poField->IsNullable())
@@ -1763,8 +1855,15 @@ OGRErr OGRGeoPackageTableLayer::CreateField(OGRFieldDefn *poField,
         }
     }
 
-    m_poFeatureDefn->AddFieldDefn(&oFieldDefn);
-    m_abGeneratedColumns.resize(m_poFeatureDefn->GetFieldCount());
+    whileUnsealing(m_poFeatureDefn)->AddFieldDefn(&oFieldDefn);
+
+    if (m_poDS->IsInTransaction())
+    {
+        m_apoFieldDefnChanges.emplace_back(
+            std::make_unique<OGRFieldDefn>(oFieldDefn),
+            m_poFeatureDefn->GetFieldCount() - 1, FieldChangeType::ADD_FIELD,
+            m_poDS->GetCurrentSavepoint());
+    }
 
     if (m_pszFidColumn != nullptr &&
         EQUAL(oFieldDefn.GetNameRef(), m_pszFidColumn))
@@ -1785,7 +1884,7 @@ OGRErr OGRGeoPackageTableLayer::CreateField(OGRFieldDefn *poField,
 /************************************************************************/
 
 bool OGRGeoPackageTableLayer::DoSpecialProcessingForColumnCreation(
-    OGRFieldDefn *poField)
+    const OGRFieldDefn *poField)
 {
     const std::string &osConstraintName(poField->GetDomainName());
     const std::string osName(poField->GetAlternativeNameRef());
@@ -1874,8 +1973,9 @@ bool OGRGeoPackageTableLayer::DoSpecialProcessingForColumnCreation(
 /*                           CreateGeomField()                          */
 /************************************************************************/
 
-OGRErr OGRGeoPackageTableLayer::CreateGeomField(OGRGeomFieldDefn *poGeomFieldIn,
-                                                int /* bApproxOK */)
+OGRErr
+OGRGeoPackageTableLayer::CreateGeomField(const OGRGeomFieldDefn *poGeomFieldIn,
+                                         int /* bApproxOK */)
 {
     if (!m_bFeatureDefnCompleted)
         GetLayerDefn();
@@ -1885,7 +1985,7 @@ OGRErr OGRGeoPackageTableLayer::CreateGeomField(OGRGeomFieldDefn *poGeomFieldIn,
     if (m_poFeatureDefn->GetGeomFieldCount() == 1)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
-                 "Cannot create more than on geometry field in GeoPackage");
+                 "Cannot create more than one geometry field in GeoPackage");
         return OGRERR_FAILURE;
     }
 
@@ -1912,8 +2012,7 @@ OGRErr OGRGeoPackageTableLayer::CreateGeomField(OGRGeomFieldDefn *poGeomFieldIn,
     }
 
     const OGRSpatialReference *poSRS = oGeomField.GetSpatialRef();
-    if (poSRS != nullptr)
-        m_iSrs = m_poDS->GetSrsId(*poSRS);
+    m_iSrs = m_poDS->GetSrsId(poSRS);
 
     /* -------------------------------------------------------------------- */
     /*      Create the new field.                                           */
@@ -1937,7 +2036,14 @@ OGRErr OGRGeoPackageTableLayer::CreateGeomField(OGRGeomFieldDefn *poGeomFieldIn,
             return err;
     }
 
-    m_poFeatureDefn->AddGeomFieldDefn(&oGeomField);
+    if (m_poDS->IsInTransaction())
+    {
+        m_apoGeomFieldDefnChanges.emplace_back(
+            std::make_unique<OGRGeomFieldDefn>(oGeomField),
+            m_poFeatureDefn->GetGeomFieldCount(), FieldChangeType::ADD_FIELD);
+    }
+
+    whileUnsealing(m_poFeatureDefn)->AddGeomFieldDefn(&oGeomField);
 
     if (!m_bDeferredCreation)
     {
@@ -2042,19 +2148,25 @@ void OGRGeoPackageTableLayer::DisableFeatureCountTriggers(
 /*                      CheckGeometryType()                             */
 /************************************************************************/
 
-void OGRGeoPackageTableLayer::CheckGeometryType(OGRFeature *poFeature)
+/** Check that the feature geometry type is consistent with the layer geometry
+ * type.
+ *
+ * And potentially update the Z and M flags of gpkg_geometry_columns to
+ * reflect the dimensionality of feature geometries.
+ */
+void OGRGeoPackageTableLayer::CheckGeometryType(const OGRFeature *poFeature)
 {
-    OGRwkbGeometryType eLayerGeomType = wkbFlatten(GetGeomType());
-    if (eLayerGeomType != wkbNone && eLayerGeomType != wkbUnknown)
+    const OGRwkbGeometryType eLayerGeomType = GetGeomType();
+    const OGRwkbGeometryType eFlattenLayerGeomType = wkbFlatten(eLayerGeomType);
+    const OGRGeometry *poGeom = poFeature->GetGeometryRef();
+    if (eFlattenLayerGeomType != wkbNone && eFlattenLayerGeomType != wkbUnknown)
     {
-        OGRGeometry *poGeom = poFeature->GetGeometryRef();
         if (poGeom != nullptr)
         {
             OGRwkbGeometryType eGeomType =
                 wkbFlatten(poGeom->getGeometryType());
-            if (!OGR_GT_IsSubClassOf(eGeomType, eLayerGeomType) &&
-                m_eSetBadGeomTypeWarned.find(eGeomType) ==
-                    m_eSetBadGeomTypeWarned.end())
+            if (!OGR_GT_IsSubClassOf(eGeomType, eFlattenLayerGeomType) &&
+                !cpl::contains(m_eSetBadGeomTypeWarned, eGeomType))
             {
                 CPLError(CE_Warning, CPLE_AppDefined,
                          "A geometry of type %s is inserted into layer %s "
@@ -2067,29 +2179,47 @@ void OGRGeoPackageTableLayer::CheckGeometryType(OGRFeature *poFeature)
                          "This warning will no longer be emitted for this "
                          "combination of layer and feature geometry type.",
                          OGRToOGCGeomType(eGeomType), GetName(),
-                         OGRToOGCGeomType(eLayerGeomType));
+                         OGRToOGCGeomType(eFlattenLayerGeomType));
                 m_eSetBadGeomTypeWarned.insert(eGeomType);
             }
         }
     }
 
-    // wkbUnknown is a rather loose type in OGR. Make sure to update
-    // the z and m columns of gpkg_geometry_columns to 2 if we have geometries
-    // with Z and M components
-    if (GetGeomType() == wkbUnknown && (m_nZFlag == 0 || m_nMFlag == 0))
+    // Make sure to update the z and m columns of gpkg_geometry_columns to 2
+    // if we have geometries with Z and M components
+    if (m_nZFlag == 0 || m_nMFlag == 0)
     {
-        OGRGeometry *poGeom = poFeature->GetGeometryRef();
         if (poGeom != nullptr)
         {
             bool bUpdateGpkgGeometryColumnsTable = false;
-            OGRwkbGeometryType eGeomType = poGeom->getGeometryType();
+            const OGRwkbGeometryType eGeomType = poGeom->getGeometryType();
             if (m_nZFlag == 0 && wkbHasZ(eGeomType))
             {
+                if (eLayerGeomType != wkbUnknown && !wkbHasZ(eLayerGeomType))
+                {
+                    CPLError(
+                        CE_Warning, CPLE_AppDefined,
+                        "Layer '%s' has been declared with non-Z geometry type "
+                        "%s, but it does contain geometries with Z. Setting "
+                        "the Z=2 hint into gpkg_geometry_columns",
+                        GetName(),
+                        OGRToOGCGeomType(eLayerGeomType, true, true, true));
+                }
                 m_nZFlag = 2;
                 bUpdateGpkgGeometryColumnsTable = true;
             }
             if (m_nMFlag == 0 && wkbHasM(eGeomType))
             {
+                if (eLayerGeomType != wkbUnknown && !wkbHasM(eLayerGeomType))
+                {
+                    CPLError(
+                        CE_Warning, CPLE_AppDefined,
+                        "Layer '%s' has been declared with non-M geometry type "
+                        "%s, but it does contain geometries with M. Setting "
+                        "the M=2 hint into gpkg_geometry_columns",
+                        GetName(),
+                        OGRToOGCGeomType(eLayerGeomType, true, true, true));
+                }
                 m_nMFlag = 2;
                 bUpdateGpkgGeometryColumnsTable = true;
             }
@@ -2114,7 +2244,7 @@ void OGRGeoPackageTableLayer::CheckGeometryType(OGRFeature *poFeature)
 static bool CheckFIDAndFIDColumnConsistency(const OGRFeature *poFeature,
                                             int iFIDAsRegularColumnIndex)
 {
-    bool ok = false;
+    bool ok = true;
     if (!poFeature->IsFieldSetAndNotNull(iFIDAsRegularColumnIndex))
     {
         // nothing to do
@@ -2125,25 +2255,29 @@ static bool CheckFIDAndFIDColumnConsistency(const OGRFeature *poFeature,
     {
         const double dfFID =
             poFeature->GetFieldAsDouble(iFIDAsRegularColumnIndex);
-        if (dfFID >= static_cast<double>(std::numeric_limits<int64_t>::min()) &&
-            dfFID <= static_cast<double>(std::numeric_limits<int64_t>::max()))
+        if (GDALIsValueInRange<int64_t>(dfFID))
         {
             const auto nFID = static_cast<GIntBig>(dfFID);
-            if (nFID == poFeature->GetFID())
+            if (nFID != poFeature->GetFID())
             {
-                ok = true;
+                ok = false;
+                CPLError(CE_Failure, CPLE_AppDefined,
+                         "Inconsistent values of FID (" CPL_FRMT_GIB
+                         ") and field of same name (%g)",
+                         poFeature->GetFID(),
+                         poFeature->GetFieldAsDouble(iFIDAsRegularColumnIndex));
             }
         }
     }
-    else if (poFeature->GetFieldAsInteger64(iFIDAsRegularColumnIndex) ==
+    else if (poFeature->GetFieldAsInteger64(iFIDAsRegularColumnIndex) !=
              poFeature->GetFID())
     {
-        ok = true;
-    }
-    if (!ok)
-    {
+        ok = false;
         CPLError(CE_Failure, CPLE_AppDefined,
-                 "Inconsistent values of FID and field of same name");
+                 "Inconsistent values of FID (" CPL_FRMT_GIB
+                 ") and field of same name (" CPL_FRMT_GIB ")",
+                 poFeature->GetFID(),
+                 poFeature->GetFieldAsInteger64(iFIDAsRegularColumnIndex));
     }
     return ok;
 }
@@ -2206,31 +2340,19 @@ OGRErr OGRGeoPackageTableLayer::CreateOrUpsertFeature(OGRFeature *poFeature,
     std::string osUpsertUniqueColumnName;
     if (bUpsert && poFeature->GetFID() == OGRNullFID)
     {
-#if SQLITE_VERSION_NUMBER >= 3024000L
         int nUniqueColumns = 0;
-#endif
         const int nFieldCount = m_poFeatureDefn->GetFieldCount();
         for (int i = 0; i < nFieldCount; ++i)
         {
             const auto poFieldDefn = m_poFeatureDefn->GetFieldDefn(i);
             if (poFieldDefn->IsUnique())
             {
-#if SQLITE_VERSION_NUMBER < 3024000L
-                CPLError(CE_Failure, CPLE_AppDefined,
-                         "UPSERT of a feature without a FID but with a UNIQUE "
-                         "column "
-                         "requires SQLite 3.24 or later");
-                return OGRERR_FAILURE;
-#else
                 if (osUpsertUniqueColumnName.empty())
                     osUpsertUniqueColumnName = poFieldDefn->GetNameRef();
                 nUniqueColumns++;
-#endif
             }
         }
-#if SQLITE_VERSION_NUMBER >= 3024000L
         if (nUniqueColumns == 0)
-#endif
         {
             // This is just a regular INSERT
             bUpsert = false;
@@ -2377,13 +2499,10 @@ OGRErr OGRGeoPackageTableLayer::CreateOrUpsertFeature(OGRFeature *poFeature,
 
         /* Prepare the SQL into a statement */
         sqlite3 *poDb = m_poDS->GetDB();
-        int err = sqlite3_prepare_v2(poDb, osCommand, -1, &m_poInsertStatement,
-                                     nullptr);
+        int err = SQLPrepareWithError(poDb, osCommand, -1, &m_poInsertStatement,
+                                      nullptr);
         if (err != SQLITE_OK)
         {
-            CPLError(CE_Failure, CPLE_AppDefined,
-                     "failed to prepare SQL: %s - %s", osCommand.c_str(),
-                     sqlite3_errmsg(poDb));
             return OGRERR_FAILURE;
         }
     }
@@ -2426,7 +2545,7 @@ OGRErr OGRGeoPackageTableLayer::CreateOrUpsertFeature(OGRFeature *poFeature,
 #if SQLITE_VERSION_NUMBER >= 3035000L
                              sqlite3_column_int64(m_poInsertStatement, 0)
 #else
-                             0
+                             OGRNullFID
 #endif
                              : sqlite3_last_insert_rowid(m_poDS->GetDB());
 
@@ -2439,7 +2558,7 @@ OGRErr OGRGeoPackageTableLayer::CreateOrUpsertFeature(OGRFeature *poFeature,
         m_poInsertStatement = nullptr;
     }
 
-    if (nFID != 0)
+    if (nFID != OGRNullFID)
     {
         poFeature->SetFID(nFID);
         if (m_iFIDAsRegularColumnIndex >= 0)
@@ -2538,7 +2657,26 @@ OGRErr OGRGeoPackageTableLayer::CreateOrUpsertFeature(OGRFeature *poFeature,
 
 #ifdef ENABLE_GPKG_OGR_CONTENTS
     if (m_nTotalFeatureCount >= 0)
-        m_nTotalFeatureCount++;
+    {
+        if (m_nTotalFeatureCount < std::numeric_limits<int64_t>::max())
+        {
+            m_nTotalFeatureCount++;
+        }
+        else
+        {
+            if (m_poDS->m_bHasGPKGOGRContents)
+            {
+                char *pszSQL = sqlite3_mprintf(
+                    "UPDATE gpkg_ogr_contents SET feature_count = null "
+                    "WHERE lower(table_name) = lower('%q')",
+                    m_pszTableName);
+                CPL_IGNORE_RET_VAL(sqlite3_exec(m_poDS->hDB, pszSQL, nullptr,
+                                                nullptr, nullptr));
+                sqlite3_free(pszSQL);
+            }
+            m_nTotalFeatureCount = -1;
+        }
+    }
 #endif
 
     m_bContentChanged = true;
@@ -2637,9 +2775,22 @@ void OGRGeoPackageTableLayer::StartAsyncRTree()
     }
     if (m_hAsyncDBHandle != nullptr)
     {
+        /* Make sure our auxiliary DB has the same page size as the main one.
+         * Because the number of RTree cells depends on the SQLite page size.
+         * However the sqlite implementation limits to 51 cells maximum per page,
+         * which is reached starting with a page size of 2048 bytes.
+         * As the default SQLite page size is 4096 currently, having potentially
+         * different page sizes >= 4096 between the main and auxiliary DBs would
+         * not be a practical issue, but better be consistent.
+         */
+        const int nPageSize =
+            SQLGetInteger(m_poDS->GetDB(), "PRAGMA page_size", nullptr);
+
         if (SQLCommand(m_hAsyncDBHandle,
-                       "PRAGMA journal_mode = OFF;\n"
-                       "PRAGMA synchronous = OFF;") == OGRERR_NONE)
+                       CPLSPrintf("PRAGMA page_size = %d;\n"
+                                  "PRAGMA journal_mode = OFF;\n"
+                                  "PRAGMA synchronous = OFF;",
+                                  nPageSize)) == OGRERR_NONE)
         {
             char *pszSQL = sqlite3_mprintf("ATTACH DATABASE '%q' AS '%q'",
                                            m_osAsyncDBName.c_str(),
@@ -2647,17 +2798,14 @@ void OGRGeoPackageTableLayer::StartAsyncRTree()
             OGRErr eErr = SQLCommand(m_poDS->GetDB(), pszSQL);
             sqlite3_free(pszSQL);
 
-            VSIUnlink(m_osAsyncDBName.c_str());
-
             if (eErr == OGRERR_NONE)
             {
+                m_hRTree = gdal_sqlite_rtree_bl_new(nPageSize);
                 try
                 {
                     m_oThreadRTree =
                         std::thread([this]() { AsyncRTreeThreadFunction(); });
                     m_bThreadRTreeStarted = true;
-
-                    m_hRTree = gdal_sqlite_rtree_bl_new(4096);
                 }
                 catch (const std::exception &e)
                 {
@@ -2669,6 +2817,11 @@ void OGRGeoPackageTableLayer::StartAsyncRTree()
 
         if (!m_bThreadRTreeStarted)
         {
+            if (m_hRTree)
+            {
+                gdal_sqlite_rtree_bl_free(m_hRTree);
+                m_hRTree = nullptr;
+            }
             m_oQueueRTreeEntries.clear();
             m_bErrorDuringRTreeThread = true;
             sqlite3_close(m_hAsyncDBHandle);
@@ -2689,13 +2842,16 @@ void OGRGeoPackageTableLayer::StartAsyncRTree()
 
 void OGRGeoPackageTableLayer::RemoveAsyncRTreeTempDB()
 {
-    SQLCommand(
-        m_poDS->GetDB(),
-        CPLSPrintf("DETACH DATABASE \"%s\"",
-                   SQLEscapeName(m_osAsyncDBAttachName.c_str()).c_str()));
-    m_osAsyncDBAttachName.clear();
-    VSIUnlink(m_osAsyncDBName.c_str());
-    m_osAsyncDBName.clear();
+    if (!m_osAsyncDBAttachName.empty())
+    {
+        SQLCommand(
+            m_poDS->GetDB(),
+            CPLSPrintf("DETACH DATABASE \"%s\"",
+                       SQLEscapeName(m_osAsyncDBAttachName.c_str()).c_str()));
+        m_osAsyncDBAttachName.clear();
+        VSIUnlink(m_osAsyncDBName.c_str());
+        m_osAsyncDBName.clear();
+    }
 }
 
 /************************************************************************/
@@ -2771,8 +2927,6 @@ bool OGRGeoPackageTableLayer::FlushInMemoryRTree(sqlite3 *hRTreeDB,
             m_hAsyncDBHandle = nullptr;
         }
 
-        VSIUnlink(m_osAsyncDBName.c_str());
-
         m_oQueueRTreeEntries.clear();
     }
     sqlite3_free(pszErrMsg);
@@ -2809,6 +2963,8 @@ static size_t GetMaxRAMUsageAllowedForRTree()
 
 void OGRGeoPackageTableLayer::AsyncRTreeThreadFunction()
 {
+    CPLAssert(m_hRTree);
+
     const size_t nMaxRAMUsageAllowed = GetMaxRAMUsageAllowedForRTree();
     sqlite3_stmt *hStmt = nullptr;
     GIntBig nCount = 0;
@@ -2853,14 +3009,20 @@ void OGRGeoPackageTableLayer::AsyncRTreeThreadFunction()
         if (hStmt == nullptr)
         {
             const char *pszInsertSQL =
-                "INSERT INTO my_rtree VALUES (?,?,?,?,?)";
-            if (sqlite3_prepare_v2(m_hAsyncDBHandle, pszInsertSQL, -1, &hStmt,
-                                   nullptr) != SQLITE_OK)
+                CPLGetConfigOption(
+                    "OGR_GPKG_SIMULATE_INSERT_INTO_MY_RTREE_PREPARATION_ERROR",
+                    nullptr)
+                    ? "INSERT INTO my_rtree_SIMULATE_ERROR VALUES (?,?,?,?,?)"
+                    : "INSERT INTO my_rtree VALUES (?,?,?,?,?)";
+            if (SQLPrepareWithError(m_hAsyncDBHandle, pszInsertSQL, -1, &hStmt,
+                                    nullptr) != SQLITE_OK)
             {
-                CPLError(CE_Failure, CPLE_AppDefined,
-                         "failed to prepare SQL: %s", pszInsertSQL);
-                m_oQueueRTreeEntries.clear();
                 m_bErrorDuringRTreeThread = true;
+
+                sqlite3_close(m_hAsyncDBHandle);
+                m_hAsyncDBHandle = nullptr;
+
+                m_oQueueRTreeEntries.clear();
                 return;
             }
 
@@ -3004,13 +3166,11 @@ OGRErr OGRGeoPackageTableLayer::ISetFeature(OGRFeature *poFeature)
             return OGRERR_NONE;
 
         /* Prepare the SQL into a statement */
-        int err = sqlite3_prepare_v2(m_poDS->GetDB(), osCommand.c_str(),
-                                     static_cast<int>(osCommand.size()),
-                                     &m_poUpdateStatement, nullptr);
+        int err = SQLPrepareWithError(m_poDS->GetDB(), osCommand.c_str(),
+                                      static_cast<int>(osCommand.size()),
+                                      &m_poUpdateStatement, nullptr);
         if (err != SQLITE_OK)
         {
-            CPLError(CE_Failure, CPLE_AppDefined, "failed to prepare SQL: %s",
-                     osCommand.c_str());
             return OGRERR_FAILURE;
         }
     }
@@ -3119,7 +3279,7 @@ std::string OGRGeoPackageTableLayer::FeatureGenerateUpdateSQL(
     {
         const int iField = panUpdatedFieldsIdx[i];
         if (iField == m_iFIDAsRegularColumnIndex ||
-            m_abGeneratedColumns[iField])
+            poFeatureDefn->GetFieldDefn(iField)->IsGenerated())
             continue;
         if (!poFeature->IsFieldSet(iField))
             continue;
@@ -3193,7 +3353,7 @@ OGRErr OGRGeoPackageTableLayer::IUpdateFeature(
     /* Only work with fields that are set */
     /* Do not stick values into SQL, use placeholder and bind values later
      */
-    const std::string osUpdateStatementSQL = FeatureGenerateUpdateSQL(
+    std::string osUpdateStatementSQL = FeatureGenerateUpdateSQL(
         poFeature, nUpdatedFieldsCount, panUpdatedFieldsIdx,
         nUpdatedGeomFieldsCount, panUpdatedGeomFieldsIdx);
     if (osUpdateStatementSQL.empty())
@@ -3206,16 +3366,14 @@ OGRErr OGRGeoPackageTableLayer::IUpdateFeature(
         m_poUpdateStatement = nullptr;
         /* Prepare the SQL into a statement */
         int err =
-            sqlite3_prepare_v2(m_poDS->GetDB(), osUpdateStatementSQL.c_str(),
-                               static_cast<int>(osUpdateStatementSQL.size()),
-                               &m_poUpdateStatement, nullptr);
+            SQLPrepareWithError(m_poDS->GetDB(), osUpdateStatementSQL.c_str(),
+                                static_cast<int>(osUpdateStatementSQL.size()),
+                                &m_poUpdateStatement, nullptr);
         if (err != SQLITE_OK)
         {
-            CPLError(CE_Failure, CPLE_AppDefined, "failed to prepare SQL: %s",
-                     osUpdateStatementSQL.c_str());
             return OGRERR_FAILURE;
         }
-        m_osUpdateStatementSQL = osUpdateStatementSQL;
+        m_osUpdateStatementSQL = std::move(osUpdateStatementSQL);
     }
 
     /* Bind values onto the statement now */
@@ -3327,6 +3485,7 @@ OGRErr OGRGeoPackageTableLayer::SetAttributeFilter(const char *pszQuery)
 
 void OGRGeoPackageTableLayer::ResetReading()
 {
+    m_bEOF = false;
     if (m_bDeferredCreation && RunDeferredCreationIfNecessary() != OGRERR_NONE)
         return;
 
@@ -3365,7 +3524,10 @@ void OGRGeoPackageTableLayer::ResetReading()
 OGRErr OGRGeoPackageTableLayer::SetNextByIndex(GIntBig nIndex)
 {
     if (nIndex < 0)
-        return OGRERR_FAILURE;
+    {
+        m_bEOF = true;
+        return OGRERR_NON_EXISTING_FEATURE;
+    }
     if (m_soColumns.empty())
         BuildColumns();
     return ResetStatementInternal(nIndex);
@@ -3419,9 +3581,9 @@ OGRErr OGRGeoPackageTableLayer::ResetStatementInternal(GIntBig nStartIndex)
                 bUseSpatialIndex = false;
             }
 
-            if (bUseSpatialIndex && !CPLIsInf(sEnvelope.MinX) &&
-                !CPLIsInf(sEnvelope.MinY) && !CPLIsInf(sEnvelope.MaxX) &&
-                !CPLIsInf(sEnvelope.MaxY))
+            if (bUseSpatialIndex && !std::isinf(sEnvelope.MinX) &&
+                !std::isinf(sEnvelope.MinY) && !std::isinf(sEnvelope.MaxX) &&
+                !std::isinf(sEnvelope.MaxY))
             {
                 soSQL.Printf("SELECT %s FROM \"%s\" m "
                              "JOIN \"%s\" r "
@@ -3447,12 +3609,10 @@ OGRErr OGRGeoPackageTableLayer::ResetStatementInternal(GIntBig nStartIndex)
 
     CPLDebug("GPKG", "ResetStatement(%s)", soSQL.c_str());
 
-    int err = sqlite3_prepare_v2(m_poDS->GetDB(), soSQL.c_str(), -1,
-                                 &m_poQueryStatement, nullptr);
+    int err = SQLPrepareWithError(m_poDS->GetDB(), soSQL.c_str(), -1,
+                                  &m_poQueryStatement, nullptr);
     if (err != SQLITE_OK)
     {
-        CPLError(CE_Failure, CPLE_AppDefined, "failed to prepare SQL: %s",
-                 soSQL.c_str());
         return OGRERR_FAILURE;
     }
 
@@ -3468,6 +3628,8 @@ OGRErr OGRGeoPackageTableLayer::ResetStatementInternal(GIntBig nStartIndex)
 
 OGRFeature *OGRGeoPackageTableLayer::GetNextFeature()
 {
+    if (m_bEOF)
+        return nullptr;
     if (!m_bFeatureDefnCompleted)
         GetLayerDefn();
     if (m_bDeferredCreation && RunDeferredCreationIfNecessary() != OGRERR_NONE)
@@ -3514,12 +3676,10 @@ OGRFeature *OGRGeoPackageTableLayer::GetFeature(GIntBig nFID)
                      m_soColumns.c_str(), SQLEscapeName(m_pszTableName).c_str(),
                      SQLEscapeName(m_pszFidColumn).c_str());
 
-        const int err = sqlite3_prepare_v2(m_poDS->GetDB(), soSQL.c_str(), -1,
-                                           &m_poGetFeatureStatement, nullptr);
+        const int err = SQLPrepareWithError(m_poDS->GetDB(), soSQL.c_str(), -1,
+                                            &m_poGetFeatureStatement, nullptr);
         if (err != SQLITE_OK)
         {
-            CPLError(CE_Failure, CPLE_AppDefined, "failed to prepare SQL: %s",
-                     soSQL.c_str());
             return nullptr;
         }
     }
@@ -3672,6 +3832,7 @@ bool OGRGeoPackageTableLayer::DoJobAtTransactionRollback()
         SyncToDisk();
         m_bDeferredSpatialIndexCreation = bDeferredSpatialIndexCreationBackup;
     }
+
     ResetReading();
     return true;
 }
@@ -3761,11 +3922,9 @@ bool OGRGeoPackageTableLayer::FlushPendingSpatialIndexUpdate()
     char *pszSQL = sqlite3_mprintf("INSERT INTO \"%w\" VALUES (?,?,?,?,?)",
                                    m_osRTreeName.c_str());
     sqlite3_stmt *hInsertStmt = nullptr;
-    if (sqlite3_prepare_v2(m_poDS->GetDB(), pszSQL, -1, &hInsertStmt,
-                           nullptr) != SQLITE_OK)
+    if (SQLPrepareWithError(m_poDS->GetDB(), pszSQL, -1, &hInsertStmt,
+                            nullptr) != SQLITE_OK)
     {
-        CPLError(CE_Failure, CPLE_AppDefined, "failed to prepare SQL: %s",
-                 pszSQL);
         sqlite3_free(pszSQL);
         m_aoRTreeEntries.clear();
         return false;
@@ -3895,7 +4054,8 @@ GIntBig OGRGeoPackageTableLayer::GetTotalFeatureCount()
             const char *pszFeatureCount = oResult->GetValue(0, 0);
             if (pszFeatureCount)
             {
-                m_nTotalFeatureCount = CPLAtoGIntBig(pszFeatureCount);
+                m_nTotalFeatureCount =
+                    std::max<GIntBig>(0, CPLAtoGIntBig(pszFeatureCount));
             }
         }
     }
@@ -3938,8 +4098,8 @@ GIntBig OGRGeoPackageTableLayer::GetFeatureCount(int /*bForce*/)
 
         m_poFilterGeom->getEnvelope(&sEnvelope);
 
-        if (!CPLIsInf(sEnvelope.MinX) && !CPLIsInf(sEnvelope.MinY) &&
-            !CPLIsInf(sEnvelope.MaxX) && !CPLIsInf(sEnvelope.MaxY))
+        if (!std::isinf(sEnvelope.MinX) && !std::isinf(sEnvelope.MinY) &&
+            !std::isinf(sEnvelope.MaxX) && !std::isinf(sEnvelope.MaxY))
         {
             soSQL.Printf("SELECT COUNT(*) FROM \"%s\" WHERE "
                          "maxx >= %.12f AND minx <= %.12f AND "
@@ -4107,10 +4267,11 @@ static bool GetExtentFromRTree(sqlite3 *hDB, const std::string &osRTreeName,
 }
 
 /************************************************************************/
-/*                        GetExtent()                                   */
+/*                              IGetExtent()                            */
 /************************************************************************/
 
-OGRErr OGRGeoPackageTableLayer::GetExtent(OGREnvelope *psExtent, int bForce)
+OGRErr OGRGeoPackageTableLayer::IGetExtent(int /* iGeomField  */,
+                                           OGREnvelope *psExtent, bool bForce)
 {
     if (!m_bFeatureDefnCompleted)
         GetLayerDefn();
@@ -4136,7 +4297,7 @@ OGRErr OGRGeoPackageTableLayer::GetExtent(OGREnvelope *psExtent, int bForce)
         if (GetExtentFromRTree(m_poDS->GetDB(), m_osRTreeName, psExtent->MinX,
                                psExtent->MinY, psExtent->MaxX, psExtent->MaxY))
         {
-            m_poExtent = new OGREnvelope(*psExtent);
+            m_poExtent = std::make_unique<OGREnvelope>(*psExtent);
             m_bExtentChanged = true;
             SaveExtent();
             return OGRERR_NONE;
@@ -4161,8 +4322,7 @@ OGRErr OGRGeoPackageTableLayer::GetExtent(OGREnvelope *psExtent, int bForce)
             pszC, pszC, pszC, pszC, m_pszTableName, pszC, pszC);
         auto oResult = SQLQuery(m_poDS->GetDB(), pszSQL);
         sqlite3_free(pszSQL);
-        delete m_poExtent;
-        m_poExtent = nullptr;
+        m_poExtent.reset();
         if (oResult && oResult->RowCount() == 1 &&
             oResult->GetValue(0, 0) != nullptr)
         {
@@ -4170,7 +4330,7 @@ OGRErr OGRGeoPackageTableLayer::GetExtent(OGREnvelope *psExtent, int bForce)
             psExtent->MinY = CPLAtof(oResult->GetValue(1, 0));
             psExtent->MaxX = CPLAtof(oResult->GetValue(2, 0));
             psExtent->MaxY = CPLAtof(oResult->GetValue(3, 0));
-            m_poExtent = new OGREnvelope(*psExtent);
+            m_poExtent = std::make_unique<OGREnvelope>(*psExtent);
             m_bExtentChanged = true;
             SaveExtent();
         }
@@ -4184,6 +4344,7 @@ OGRErr OGRGeoPackageTableLayer::GetExtent(OGREnvelope *psExtent, int bForce)
 
     return OGRERR_FAILURE;
 }
+
 /************************************************************************/
 /*                     UpdateContentsToNullExtent()                     */
 /************************************************************************/
@@ -4212,17 +4373,16 @@ void OGRGeoPackageTableLayer::UpdateContentsToNullExtent()
 void OGRGeoPackageTableLayer::RecomputeExtent()
 {
     m_bExtentChanged = true;
-    delete m_poExtent;
-    m_poExtent = nullptr;
+    m_poExtent.reset();
     OGREnvelope sExtent;
-    GetExtent(&sExtent, true);
+    CPL_IGNORE_RET_VAL(GetExtent(&sExtent, true));
 }
 
 /************************************************************************/
 /*                      TestCapability()                                */
 /************************************************************************/
 
-int OGRGeoPackageTableLayer::TestCapability(const char *pszCap)
+int OGRGeoPackageTableLayer::TestCapability(const char *pszCap) const
 {
     if (!m_bFeatureDefnCompleted)
         GetLayerDefn();
@@ -4277,6 +4437,8 @@ int OGRGeoPackageTableLayer::TestCapability(const char *pszCap)
     else if (EQUAL(pszCap, OLCMeasuredGeometries))
         return TRUE;
     else if (EQUAL(pszCap, OLCZGeometries))
+        return TRUE;
+    if (EQUAL(pszCap, OLCFastGetExtent3D))
         return TRUE;
     else
     {
@@ -4375,7 +4537,11 @@ bool OGRGeoPackageTableLayer::CreateSpatialIndex(const char *pszTableName)
             sqlite3_close(m_hAsyncDBHandle);
             m_hAsyncDBHandle = nullptr;
         }
-        if (!m_bErrorDuringRTreeThread)
+        if (m_bErrorDuringRTreeThread)
+        {
+            RemoveAsyncRTreeTempDB();
+        }
+        else
         {
             bPopulateFromThreadRTree = true;
         }
@@ -4430,6 +4596,7 @@ bool OGRGeoPackageTableLayer::CreateSpatialIndex(const char *pszTableName)
         /* Populate the RTree */
         const size_t nMaxRAMUsageAllowed = GetMaxRAMUsageAllowedForRTree();
         char *pszErrMsg = nullptr;
+
         struct ProgressCbk
         {
             static bool progressCbk(const char *pszMessage, void *)
@@ -4818,8 +4985,7 @@ void OGRGeoPackageTableLayer::CheckUnknownExtensions()
 {
     const std::map<CPLString, std::vector<GPKGExtensionDesc>> &oMap =
         m_poDS->GetUnknownExtensionsTableSpecific();
-    std::map<CPLString, std::vector<GPKGExtensionDesc>>::const_iterator oIter =
-        oMap.find(CPLString(m_pszTableName).toupper());
+    const auto oIter = oMap.find(CPLString(m_pszTableName).toupper());
     if (oIter != oMap.end())
     {
         for (size_t i = 0; i < oIter->second.size(); i++)
@@ -4958,7 +5124,7 @@ bool OGRGeoPackageTableLayer::CreateGeometryExtensionIfNecessary(
 /*                        HasSpatialIndex()                             */
 /************************************************************************/
 
-bool OGRGeoPackageTableLayer::HasSpatialIndex()
+bool OGRGeoPackageTableLayer::HasSpatialIndex() const
 {
     if (!m_bFeatureDefnCompleted)
         GetLayerDefn();
@@ -4973,16 +5139,14 @@ bool OGRGeoPackageTableLayer::HasSpatialIndex()
 
     const char *pszT = m_pszTableName;
     const char *pszC = m_poFeatureDefn->GetGeomFieldDefn(0)->GetNameRef();
-    CPLString osRTreeName("rtree_");
-    osRTreeName += pszT;
-    osRTreeName += "_";
-    osRTreeName += pszC;
+    CPLString osRTreeName(
+        CPLString("rtree_").append(pszT).append("_").append(pszC));
     const std::map<CPLString, CPLString> &oMap =
         m_poDS->GetNameTypeMapFromSQliteMaster();
-    if (oMap.find(CPLString(osRTreeName).toupper()) != oMap.end())
+    if (cpl::contains(oMap, CPLString(osRTreeName).toupper()))
     {
         m_bHasSpatialIndex = true;
-        m_osRTreeName = osRTreeName;
+        m_osRTreeName = std::move(osRTreeName);
         m_osFIDForRTree = m_pszFidColumn;
     }
 
@@ -4990,14 +5154,16 @@ bool OGRGeoPackageTableLayer::HasSpatialIndex()
     // Cf https://github.com/OSGeo/gdal/pull/6911
     if (m_bHasSpatialIndex)
     {
-        const auto nFC = GetTotalFeatureCount();
+        const auto nFC =
+            const_cast<OGRGeoPackageTableLayer *>(this)->GetTotalFeatureCount();
         if (nFC >= atoi(CPLGetConfigOption(
                        "OGR_GPKG_THRESHOLD_DETECT_BROKEN_RTREE", "100000")))
         {
             CPLString osSQL = "SELECT 1 FROM \"";
             osSQL += SQLEscapeName(pszT);
             osSQL += "\" WHERE \"";
-            osSQL += SQLEscapeName(GetFIDColumn());
+            osSQL += SQLEscapeName(
+                const_cast<OGRGeoPackageTableLayer *>(this)->GetFIDColumn());
             osSQL += "\" = ";
             osSQL += CPLSPrintf(CPL_FRMT_GIB, nFC);
             osSQL += " AND \"";
@@ -5160,8 +5326,14 @@ OGRErr OGRGeoPackageTableLayer::Rename(const char *pszDstTableName)
         return OGRERR_FAILURE;
     }
 
+    // Temporary remove foreign key checks
+    const GPKGTemporaryForeignKeyCheckDisabler
+        oGPKGTemporaryForeignKeyCheckDisabler(m_poDS);
+
     if (m_poDS->SoftStartTransaction() != OGRERR_NONE)
+    {
         return OGRERR_FAILURE;
+    }
 
 #ifdef ENABLE_GPKG_OGR_CONTENTS
     DisableFeatureCountTriggers(false);
@@ -5317,7 +5489,7 @@ OGRErr OGRGeoPackageTableLayer::Rename(const char *pszDstTableName)
             if (bHasSpatialIndex)
             {
                 m_poDS->RemoveTableFromSQLiteMasterCache(m_osRTreeName);
-                m_osRTreeName = osRTreeNameNew;
+                m_osRTreeName = std::move(osRTreeNameNew);
             }
         }
     }
@@ -5331,17 +5503,18 @@ OGRErr OGRGeoPackageTableLayer::Rename(const char *pszDstTableName)
         m_poDS->ClearCachedRelationships();
 
         SetDescription(pszDstTableName);
-        m_poFeatureDefn->SetName(pszDstTableName);
+        whileUnsealing(m_poFeatureDefn)->SetName(pszDstTableName);
     }
 
     return eErr;
 }
 
 /************************************************************************/
-/*                          SetSpatialFilter()                          */
+/*                         ISetSpatialFilter()                          */
 /************************************************************************/
 
-void OGRGeoPackageTableLayer::SetSpatialFilter(OGRGeometry *poGeomIn)
+OGRErr OGRGeoPackageTableLayer::ISetSpatialFilter(int /*iGeomField*/,
+                                                  const OGRGeometry *poGeomIn)
 
 {
     if (!m_bFeatureDefnCompleted)
@@ -5352,6 +5525,7 @@ void OGRGeoPackageTableLayer::SetSpatialFilter(OGRGeometry *poGeomIn)
 
         ResetReading();
     }
+    return OGRERR_NONE;
 }
 
 /************************************************************************/
@@ -5388,10 +5562,10 @@ CPLString OGRGeoPackageTableLayer::GetSpatialWhere(int m_iGeomColIn,
         const char *pszC =
             m_poFeatureDefn->GetGeomFieldDefn(m_iGeomColIn)->GetNameRef();
 
-        if (CPLIsInf(sEnvelope.MinX) && sEnvelope.MinX < 0 &&
-            CPLIsInf(sEnvelope.MinY) && sEnvelope.MinY < 0 &&
-            CPLIsInf(sEnvelope.MaxX) && sEnvelope.MaxX > 0 &&
-            CPLIsInf(sEnvelope.MaxY) && sEnvelope.MaxY > 0)
+        if (std::isinf(sEnvelope.MinX) && sEnvelope.MinX < 0 &&
+            std::isinf(sEnvelope.MinY) && sEnvelope.MinY < 0 &&
+            std::isinf(sEnvelope.MaxX) && sEnvelope.MaxX > 0 &&
+            std::isinf(sEnvelope.MaxY) && sEnvelope.MaxY > 0)
         {
             osSpatialWHERE.Printf(
                 "(\"%s\" IS NOT NULL AND NOT ST_IsEmpty(\"%s\"))",
@@ -5455,6 +5629,7 @@ CPLString OGRGeoPackageTableLayer::GetSpatialWhere(int m_iGeomColIn,
 
     return osSpatialWHERE;
 }
+
 /************************************************************************/
 /*                             BuildWhere()                             */
 /*                                                                      */
@@ -5522,7 +5697,9 @@ void OGRGeoPackageTableLayer::SetOpeningParameters(
 
 void OGRGeoPackageTableLayer::SetCreationParameters(
     OGRwkbGeometryType eGType, const char *pszGeomColumnName, int bGeomNullable,
-    OGRSpatialReference *poSRS, const char *pszFIDColumnName,
+    const OGRSpatialReference *poSRS, const char *pszSRID,
+    const OGRGeomCoordinatePrecision &oCoordPrec, bool bDiscardCoordLSB,
+    bool bUndoDiscardCoordLSBOnReading, const char *pszFIDColumnName,
     const char *pszIdentifier, const char *pszDescription)
 {
     m_bIsSpatial = eGType != wkbNone;
@@ -5534,16 +5711,119 @@ void OGRGeoPackageTableLayer::SetCreationParameters(
     m_bTableCreatedInTransaction = m_poDS->IsInTransaction();
     m_bHasTriedDetectingFID64 = true;
     m_pszFidColumn = CPLStrdup(pszFIDColumnName);
+    m_bUndoDiscardCoordLSBOnReading = bUndoDiscardCoordLSBOnReading;
 
     if (eGType != wkbNone)
     {
         m_nZFlag = wkbHasZ(eGType) ? 1 : 0;
         m_nMFlag = wkbHasM(eGType) ? 1 : 0;
+
+        std::unique_ptr<OGRSpatialReference, OGRSpatialReferenceReleaser>
+            poGotSRS;
         OGRGeomFieldDefn oGeomFieldDefn(pszGeomColumnName, eGType);
-        if (poSRS)
-            m_iSrs = m_poDS->GetSrsId(*poSRS);
+
         oGeomFieldDefn.SetSpatialRef(poSRS);
+        if (pszSRID)
+        {
+            m_iSrs = atoi(pszSRID);
+            if (m_iSrs == GDALGeoPackageDataset::FIRST_CUSTOM_SRSID - 1)
+            {
+                m_iSrs = m_poDS->GetSrsId(nullptr);
+                oGeomFieldDefn.SetSpatialRef(nullptr);
+            }
+            else
+            {
+                poGotSRS =
+                    m_poDS->GetSpatialRef(m_iSrs, /* bFallbackToEPSG = */ false,
+                                          /* bEmitErrorIfNotFound = */ false);
+                if (poGotSRS)
+                {
+                    oGeomFieldDefn.SetSpatialRef(poGotSRS.get());
+                }
+                else
+                {
+                    bool bOK = false;
+                    OGRSpatialReference *poSRSTmp = new OGRSpatialReference();
+                    if (m_iSrs < 32767)
+                    {
+                        CPLErrorHandlerPusher oErrorHandler(
+                            CPLQuietErrorHandler);
+                        CPLErrorStateBackuper oBackuper;
+                        if (poSRSTmp->importFromEPSG(m_iSrs) == OGRERR_NONE)
+                        {
+                            bOK = true;
+                            poSRSTmp->SetAxisMappingStrategy(
+                                OAMS_TRADITIONAL_GIS_ORDER);
+                            m_iSrs = m_poDS->GetSrsId(poSRSTmp);
+                            oGeomFieldDefn.SetSpatialRef(poSRSTmp);
+                        }
+                    }
+                    if (!bOK)
+                    {
+                        CPLError(
+                            CE_Warning, CPLE_AppDefined,
+                            "No entry in gpkg_spatial_ref_sys matching SRID=%s",
+                            pszSRID);
+                    }
+                    poSRSTmp->Release();
+                }
+            }
+        }
+        else
+        {
+            m_iSrs = m_poDS->GetSrsId(poSRS);
+        }
         oGeomFieldDefn.SetNullable(bGeomNullable);
+        oGeomFieldDefn.SetCoordinatePrecision(oCoordPrec);
+
+        if (bDiscardCoordLSB)
+            m_sBinaryPrecision.SetFrom(oCoordPrec);
+
+        // Save coordinate precision in gpkg_metadata/gpkg_metadata_reference
+        if ((oCoordPrec.dfXYResolution != OGRGeomCoordinatePrecision::UNKNOWN ||
+             oCoordPrec.dfZResolution != OGRGeomCoordinatePrecision::UNKNOWN ||
+             oCoordPrec.dfMResolution != OGRGeomCoordinatePrecision::UNKNOWN) &&
+            (m_poDS->HasMetadataTables() || m_poDS->CreateMetadataTables()))
+        {
+            std::string osCoordPrecision = "<CoordinatePrecision ";
+            if (oCoordPrec.dfXYResolution !=
+                OGRGeomCoordinatePrecision::UNKNOWN)
+                osCoordPrecision += CPLSPrintf(" xy_resolution=\"%g\"",
+                                               oCoordPrec.dfXYResolution);
+            if (oCoordPrec.dfZResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+                osCoordPrecision += CPLSPrintf(" z_resolution=\"%g\"",
+                                               oCoordPrec.dfZResolution);
+            if (oCoordPrec.dfMResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+                osCoordPrecision += CPLSPrintf(" m_resolution=\"%g\"",
+                                               oCoordPrec.dfMResolution);
+            osCoordPrecision += CPLSPrintf(" discard_coord_lsb=\"%s\"",
+                                           bDiscardCoordLSB ? "true" : "false");
+            osCoordPrecision +=
+                CPLSPrintf(" undo_discard_coord_lsb_on_reading=\"%s\"",
+                           m_bUndoDiscardCoordLSBOnReading ? "true" : "false");
+            osCoordPrecision += " />";
+
+            char *pszSQL = sqlite3_mprintf(
+                "INSERT INTO gpkg_metadata "
+                "(md_scope, md_standard_uri, mime_type, metadata) VALUES "
+                "('dataset','http://gdal.org','text/xml','%q')",
+                osCoordPrecision.c_str());
+            CPL_IGNORE_RET_VAL(SQLCommand(m_poDS->GetDB(), pszSQL));
+            sqlite3_free(pszSQL);
+
+            const sqlite_int64 nFID =
+                sqlite3_last_insert_rowid(m_poDS->GetDB());
+            pszSQL = sqlite3_mprintf(
+                "INSERT INTO gpkg_metadata_reference (reference_scope, "
+                "table_name, column_name, timestamp, md_file_id) VALUES "
+                "('column', '%q', '%q', %s, %d)",
+                m_pszTableName, pszGeomColumnName,
+                m_poDS->GetCurrentDateEscapedSQL().c_str(),
+                static_cast<int>(nFID));
+            CPL_IGNORE_RET_VAL(SQLCommand(m_poDS->GetDB(), pszSQL));
+            sqlite3_free(pszSQL);
+        }
+
         m_poFeatureDefn->AddGeomFieldDefn(&oGeomFieldDefn);
     }
     if (pszIdentifier)
@@ -5556,6 +5836,8 @@ void OGRGeoPackageTableLayer::SetCreationParameters(
         m_osDescriptionLCO = pszDescription;
         OGRLayer::SetMetadataItem("DESCRIPTION", pszDescription);
     }
+
+    m_poFeatureDefn->Seal(/* bSealFields = */ true);
 }
 
 /************************************************************************/
@@ -5752,11 +6034,6 @@ OGRErr OGRGeoPackageTableLayer::RunDeferredCreationIfNecessary()
     /* Update gpkg_contents with the table info */
     const OGRwkbGeometryType eGType = GetGeomType();
     const bool bIsSpatial = (eGType != wkbNone);
-    if (bIsSpatial)
-        err = RegisterGeometryColumn();
-
-    if (err != OGRERR_NONE)
-        return OGRERR_FAILURE;
 
     if (bIsSpatial || m_eASpatialVariant == GPKG_ATTRIBUTES)
     {
@@ -5782,6 +6059,15 @@ OGRErr OGRGeoPackageTableLayer::RunDeferredCreationIfNecessary()
             return OGRERR_FAILURE;
     }
 
+    if (bIsSpatial)
+    {
+        // Insert into gpkg_geometry_columns after gpkg_contents because of
+        // foreign key constraints
+        err = RegisterGeometryColumn();
+        if (err != OGRERR_NONE)
+            return OGRERR_FAILURE;
+    }
+
 #ifdef ENABLE_GPKG_OGR_CONTENTS
     if (m_poDS->m_bHasGPKGOGRContents)
     {
@@ -5793,7 +6079,7 @@ OGRErr OGRGeoPackageTableLayer::RunDeferredCreationIfNecessary()
 
         pszSQL = sqlite3_mprintf(
             "INSERT INTO gpkg_ogr_contents (table_name, feature_count) "
-            "VALUES ('%q', NULL)",
+            "VALUES ('%q', 0)",
             pszLayerName);
         err = SQLCommand(m_poDS->GetDB(), pszSQL);
         sqlite3_free(pszSQL);
@@ -5862,7 +6148,8 @@ char **OGRGeoPackageTableLayer::GetMetadata(const char *pszDomain)
         return OGRLayer::GetMetadata(pszDomain);
 
     char *pszSQL = sqlite3_mprintf(
-        "SELECT md.metadata, md.md_standard_uri, md.mime_type "
+        "SELECT md.metadata, md.md_standard_uri, md.mime_type, "
+        "mdr.reference_scope "
         "FROM gpkg_metadata md "
         "JOIN gpkg_metadata_reference mdr ON (md.id = mdr.md_file_id ) "
         "WHERE lower(mdr.table_name) = lower('%q') ORDER BY md.id "
@@ -5884,9 +6171,10 @@ char **OGRGeoPackageTableLayer::GetMetadata(const char *pszDomain)
         const char *pszMetadata = oResult->GetValue(0, i);
         const char *pszMDStandardURI = oResult->GetValue(1, i);
         const char *pszMimeType = oResult->GetValue(2, i);
+        const char *pszReferenceScope = oResult->GetValue(3, i);
         if (pszMetadata && pszMDStandardURI && pszMimeType &&
-            EQUAL(pszMDStandardURI, "http://gdal.org") &&
-            EQUAL(pszMimeType, "text/xml"))
+            pszReferenceScope && EQUAL(pszMDStandardURI, "http://gdal.org") &&
+            EQUAL(pszMimeType, "text/xml") && EQUAL(pszReferenceScope, "table"))
         {
             CPLXMLNode *psXMLNode = CPLParseXMLString(pszMetadata);
             if (psXMLNode)
@@ -5896,8 +6184,8 @@ char **OGRGeoPackageTableLayer::GetMetadata(const char *pszDomain)
 
                 papszMetadata =
                     CSLMerge(papszMetadata, oLocalMDMD.GetMetadata());
-                char **papszDomainList = oLocalMDMD.GetDomainList();
-                char **papszIter = papszDomainList;
+                CSLConstList papszDomainList = oLocalMDMD.GetDomainList();
+                CSLConstList papszIter = papszDomainList;
                 while (papszIter && *papszIter)
                 {
                     if (!EQUAL(*papszIter, ""))
@@ -6188,11 +6476,18 @@ OGRErr OGRGeoPackageTableLayer::DeleteField(int iFieldToDelete)
     /* -------------------------------------------------------------------- */
     m_poDS->ResetReadingAllLayers();
 
-    if (m_poDS->SoftStartTransaction() != OGRERR_NONE)
-        return OGRERR_FAILURE;
+    // Temporary remove foreign key checks
+    const GPKGTemporaryForeignKeyCheckDisabler
+        oGPKGTemporaryForeignKeyCheckDisabler(m_poDS);
 
-        // ALTER TABLE ... DROP COLUMN ... was first implemented in 3.35.0 but
-        // there was bug fixes related to it until 3.35.5
+    if (m_poDS->GetCurrentSavepoint().empty() &&
+        m_poDS->SoftStartTransaction() != OGRERR_NONE)
+    {
+        return OGRERR_FAILURE;
+    }
+
+    // ALTER TABLE ... DROP COLUMN ... was first implemented in 3.35.0 but
+    // there was bug fixes related to it until 3.35.5
 #if SQLITE_VERSION_NUMBER >= 3035005L
     OGRErr eErr = SQLCommand(
         m_poDS->GetDB(), CPLString()
@@ -6308,27 +6603,38 @@ OGRErr OGRGeoPackageTableLayer::DeleteField(int iFieldToDelete)
     /* -------------------------------------------------------------------- */
     if (eErr == OGRERR_NONE)
     {
-        eErr = m_poDS->SoftCommitTransaction();
+
+        if (m_poDS->GetCurrentSavepoint().empty())
+            eErr = m_poDS->SoftCommitTransaction();
+
         if (eErr == OGRERR_NONE)
         {
-            eErr = m_poFeatureDefn->DeleteFieldDefn(iFieldToDelete);
-            if (eErr == OGRERR_NONE)
-            {
-#if SQLITE_VERSION_NUMBER >= 3035005L
-                m_abGeneratedColumns.erase(m_abGeneratedColumns.begin() +
-                                           iFieldToDelete);
-#else
-                // We have recreated the table from scratch, and lost the
-                // generated column property
-                std::fill(m_abGeneratedColumns.begin(),
-                          m_abGeneratedColumns.end(), false);
-#endif
-            }
 
+            if (m_poDS->IsInTransaction())
+            {
+                auto poFieldDefn{whileUnsealing(m_poFeatureDefn)
+                                     ->StealFieldDefn(iFieldToDelete)};
+                if (poFieldDefn)
+                {
+                    m_apoFieldDefnChanges.emplace_back(
+                        std::move(poFieldDefn), iFieldToDelete,
+                        FieldChangeType::DELETE_FIELD,
+                        m_poDS->GetCurrentSavepoint());
+                }
+                else
+                {
+                    eErr = OGRERR_FAILURE;
+                }
+            }
+            else
+            {
+                eErr = whileUnsealing(m_poFeatureDefn)
+                           ->DeleteFieldDefn(iFieldToDelete);
+            }
             ResetReading();
         }
     }
-    else
+    else if (m_poDS->GetCurrentSavepoint().empty())
     {
         m_poDS->SoftRollbackTransaction();
     }
@@ -6455,7 +6761,7 @@ OGRErr OGRGeoPackageTableLayer::AlterFieldDefn(int iFieldToAlter,
     /*      Build the modified field definition from the flags.             */
     /* -------------------------------------------------------------------- */
     OGRFieldDefn oTmpFieldDefn(poFieldDefnToAlter);
-    bool bUseRewriteSchemaMethod = (m_poDS->nSoftTransactionLevel == 0);
+    bool bUseRewriteSchemaMethod = (m_poDS->m_nSoftTransactionLevel == 0);
     int nActualFlags = 0;
     if (bRenameCol)
     {
@@ -6552,15 +6858,9 @@ OGRErr OGRGeoPackageTableLayer::AlterFieldDefn(int iFieldToAlter,
     /* -------------------------------------------------------------------- */
     m_poDS->ResetReadingAllLayers();
 
-    // ALTER TABLE ... RENAME COLUMN ... was first implemented in 3.25.0 but
-    // 3.26.0 was required so that foreign key constraints are updated as well
-#if SQLITE_VERSION_NUMBER >= 3026000L
     const bool bUseRenameColumn = (nActualFlags == ALTER_NAME_FLAG);
     if (bUseRenameColumn)
         bUseRewriteSchemaMethod = false;
-#else
-    constexpr bool bUseRenameColumn = false;
-#endif
 
     if (m_poDS->SoftStartTransaction() != OGRERR_NONE)
         return OGRERR_FAILURE;
@@ -6599,7 +6899,6 @@ OGRErr OGRGeoPackageTableLayer::AlterFieldDefn(int iFieldToAlter,
         }
     }
 
-#if SQLITE_VERSION_NUMBER >= 3026000L
     if (bUseRenameColumn)
     {
         if (eErr == OGRERR_NONE)
@@ -6615,9 +6914,7 @@ OGRErr OGRGeoPackageTableLayer::AlterFieldDefn(int iFieldToAlter,
                     .c_str());
         }
     }
-    else
-#endif
-        if (!bUseRewriteSchemaMethod)
+    else if (!bUseRewriteSchemaMethod)
     {
         /* --------------------------------------------------------------------
          */
@@ -6765,6 +7062,7 @@ OGRErr OGRGeoPackageTableLayer::AlterFieldDefn(int iFieldToAlter,
     /* -------------------------------------------------------------------- */
     if (eErr == OGRERR_NONE)
     {
+
         eErr = m_poDS->SoftCommitTransaction();
 
         // We need to force database reopening due to schema change
@@ -6810,6 +7108,16 @@ OGRErr OGRGeoPackageTableLayer::AlterFieldDefn(int iFieldToAlter,
 
         if (eErr == OGRERR_NONE)
         {
+
+            if (m_poDS->IsInTransaction())
+            {
+                m_apoFieldDefnChanges.emplace_back(
+                    std::make_unique<OGRFieldDefn>(poFieldDefnToAlter),
+                    iFieldToAlter, FieldChangeType::ALTER_FIELD,
+                    m_poDS->GetCurrentSavepoint());
+            }
+
+            auto oTemporaryUnsealer(poFieldDefnToAlter->GetTemporaryUnsealer());
             bool bNeedsEntryInGpkgDataColumns = false;
 
             // field type
@@ -6951,6 +7259,7 @@ OGRErr OGRGeoPackageTableLayer::AlterGeomFieldDefn(
     m_poDS->ResetReadingAllLayers();
 
     auto poGeomFieldDefn = m_poFeatureDefn->GetGeomFieldDefn(iGeomFieldToAlter);
+    auto oTemporaryUnsealer(poGeomFieldDefn->GetTemporaryUnsealer());
 
     if (nFlagsIn & ALTER_GEOM_FIELD_DEFN_TYPE_FLAG)
     {
@@ -6983,11 +7292,6 @@ OGRErr OGRGeoPackageTableLayer::AlterGeomFieldDefn(
         strcmp(poGeomFieldDefn->GetNameRef(),
                poNewGeomFieldDefn->GetNameRef()) != 0)
     {
-        // ALTER TABLE ... RENAME COLUMN ... was first implemented in 3.25.0 but
-        // 3.26.0 was required so that foreign key constraints are updated as
-        // well
-#if SQLITE_VERSION_NUMBER >= 3026000L
-
         const bool bHasSpatialIndex = HasSpatialIndex();
 
         if (m_poDS->SoftStartTransaction() != OGRERR_NONE)
@@ -7012,12 +7316,13 @@ OGRErr OGRGeoPackageTableLayer::AlterGeomFieldDefn(
         eErr = SQLCommand(
             m_poDS->GetDB(),
             CPLString()
-                .Printf("UPDATE gpkg_geometry_columns SET column_name = \"%s\" "
-                        "WHERE lower(table_name) = lower(\"%s\") "
-                        "AND lower(column_name) = lower(\"%s\")",
-                        SQLEscapeName(poNewGeomFieldDefn->GetNameRef()).c_str(),
-                        SQLEscapeName(m_pszTableName).c_str(),
-                        SQLEscapeName(poGeomFieldDefn->GetNameRef()).c_str())
+                .Printf(
+                    "UPDATE gpkg_geometry_columns SET column_name = '%s' "
+                    "WHERE lower(table_name) = lower('%s') "
+                    "AND lower(column_name) = lower('%s')",
+                    SQLEscapeLiteral(poNewGeomFieldDefn->GetNameRef()).c_str(),
+                    SQLEscapeLiteral(m_pszTableName).c_str(),
+                    SQLEscapeLiteral(poGeomFieldDefn->GetNameRef()).c_str())
                 .c_str());
         if (eErr != OGRERR_NONE)
         {
@@ -7083,12 +7388,6 @@ OGRErr OGRGeoPackageTableLayer::AlterGeomFieldDefn(
         {
             m_osRTreeName = osNewRTreeName;
         }
-
-#else
-        CPLError(CE_Failure, CPLE_NotSupported,
-                 "Geometry field renaming only supported with SQLite >= 3.26");
-        return OGRERR_FAILURE;
-#endif
     }
 
     if ((nFlagsIn & ALTER_GEOM_FIELD_DEFN_SRS_FLAG) != 0 ||
@@ -7130,20 +7429,23 @@ OGRErr OGRGeoPackageTableLayer::AlterGeomFieldDefn(
             (poOldSRS != nullptr && poNewSRS != nullptr &&
              !poOldSRS->IsSame(poNewSRS.get(), apszOptions)))
         {
+            // Temporary remove foreign key checks
+            const GPKGTemporaryForeignKeyCheckDisabler
+                oGPKGTemporaryForeignKeyCheckDisabler(m_poDS);
+
             if (m_poDS->SoftStartTransaction() != OGRERR_NONE)
                 return OGRERR_FAILURE;
 
-            const int nNewSRID =
-                poNewSRS ? m_poDS->GetSrsId(*(poNewSRS.get())) : 0;
+            const int nNewSRID = m_poDS->GetSrsId(poNewSRS.get());
 
             // Replace the old SRID by the new ones in geometry blobs
-            uint32_t nNewSRID_LSB = nNewSRID;
+            int32_t nNewSRID_LSB = nNewSRID;
             CPL_LSBPTR32(&nNewSRID_LSB);
             GByte abySRID_LSB[5] = {0, 0, 0, 0};
             memcpy(abySRID_LSB, &nNewSRID_LSB, 4);
             char *pszSRID_LSB_HEX = CPLBinaryToHex(4, abySRID_LSB);
 
-            uint32_t nNewSRID_MSB = nNewSRID;
+            int32_t nNewSRID_MSB = nNewSRID;
             CPL_MSBPTR32(&nNewSRID_MSB);
             GByte abySRID_MSB[5] = {0, 0, 0, 0};
             memcpy(abySRID_MSB, &nNewSRID_MSB, 4);
@@ -7201,7 +7503,9 @@ OGRErr OGRGeoPackageTableLayer::AlterGeomFieldDefn(
             }
 
             if (m_poDS->SoftCommitTransaction() != OGRERR_NONE)
+            {
                 return OGRERR_FAILURE;
+            }
 
             m_iSrs = nNewSRID;
             OGRSpatialReference *poSRS = poNewSRS.release();
@@ -7277,14 +7581,8 @@ OGRErr OGRGeoPackageTableLayer::ReorderFields(int *panMap)
         eErr = m_poDS->SoftCommitTransaction();
 
         if (eErr == OGRERR_NONE)
-            eErr = m_poFeatureDefn->ReorderFieldDefns(panMap);
-
-        if (eErr == OGRERR_NONE)
         {
-            // We have recreated the table from scratch, and lost the
-            // generated column property
-            std::fill(m_abGeneratedColumns.begin(), m_abGeneratedColumns.end(),
-                      false);
+            eErr = whileUnsealing(m_poFeatureDefn)->ReorderFieldDefns(panMap);
         }
 
         ResetReading();
@@ -7315,6 +7613,7 @@ struct GeometryTypeAggregateContext
         : m_hDB(hDB), m_nFlags(nFlags)
     {
     }
+
     GeometryTypeAggregateContext(const GeometryTypeAggregateContext &) = delete;
     GeometryTypeAggregateContext &
     operator=(const GeometryTypeAggregateContext &) = delete;
@@ -7401,7 +7700,7 @@ OGRGeometryTypeCounter *OGRGeoPackageTableLayer::GetGeometryTypes(
     int iGeomField, int nFlagsGGT, int &nEntryCountOut,
     GDALProgressFunc pfnProgress, void *pProgressData)
 {
-    OGRFeatureDefn *poDefn = GetLayerDefn();
+    const OGRFeatureDefn *poDefn = GetLayerDefn();
 
     /* -------------------------------------------------------------------- */
     /*      Deferred actions, reset state.                                   */
@@ -7543,42 +7842,82 @@ void OGR_GPKG_FillArrowArray_Step(sqlite3_context *pContext, int /*argc*/,
     auto psFillArrowArray = static_cast<OGRGPKGTableLayerFillArrowArray *>(
         sqlite3_user_data(pContext));
 
-    if (psFillArrowArray->nCountRows >=
-        psFillArrowArray->psHelper->m_nMaxBatchSize)
+    // To be called under psFillArrowArray->oMutex
+    const auto SubmitBatchToCaller =
+        [psFillArrowArray](std::unique_lock<std::mutex> &oLock)
     {
+        psFillArrowArray->psHelper->Shrink(psFillArrowArray->nCountRows);
+        psFillArrowArray->bThreadReady = true;
+        psFillArrowArray->oCV.notify_one();
+        while (psFillArrowArray->nCountRows > 0)
+        {
+            psFillArrowArray->oCV.wait(oLock);
+        }
+    };
+
+    const auto DealWithTooBigArray =
+        [&SubmitBatchToCaller, psFillArrowArray](int iFeat)
+    {
+        CPLDebug("GPKG",
+                 "OGR_GPKG_FillArrowArray_Step(): premature "
+                 "notification of %d features to consumer due "
+                 "to too big array",
+                 iFeat);
         if (psFillArrowArray->bAsynchronousMode)
         {
             std::unique_lock<std::mutex> oLock(psFillArrowArray->oMutex);
-            psFillArrowArray->psHelper->Shrink(psFillArrowArray->nCountRows);
-            psFillArrowArray->oCV.notify_one();
-            while (psFillArrowArray->nCountRows > 0)
-            {
-                psFillArrowArray->oCV.wait(oLock);
-            }
-            // Note that psFillArrowArray->psHelper.get() will generally now be
-            // different from before the wait()
+            psFillArrowArray->bMemoryLimitReached = true;
+            SubmitBatchToCaller(oLock);
         }
         else
         {
-            // should not happen !
-            psFillArrowArray->osErrorMsg =
-                "OGR_GPKG_FillArrowArray_Step() got more rows than expected!";
+            {
+                std::unique_lock<std::mutex> oLock(psFillArrowArray->oMutex);
+                psFillArrowArray->bMemoryLimitReached = true;
+            }
             sqlite3_interrupt(psFillArrowArray->hDB);
-            psFillArrowArray->bErrorOccurred = true;
-            return;
         }
+    };
+
+    {
+        std::unique_lock<std::mutex> oLock(psFillArrowArray->oMutex);
+        if (psFillArrowArray->nCountRows >=
+            psFillArrowArray->psHelper->m_nMaxBatchSize)
+        {
+            if (psFillArrowArray->bAsynchronousMode)
+            {
+                SubmitBatchToCaller(oLock);
+                // Note that psFillArrowArray->psHelper.get() will generally now be
+                // different from before the wait()
+            }
+            else
+            {
+                // should not happen !
+                psFillArrowArray->osErrorMsg = "OGR_GPKG_FillArrowArray_Step() "
+                                               "got more rows than expected!";
+                sqlite3_interrupt(psFillArrowArray->hDB);
+                psFillArrowArray->bErrorOccurred = true;
+                return;
+            }
+        }
+        if (psFillArrowArray->nCountRows < 0)
+            return;
     }
-    if (psFillArrowArray->nCountRows < 0)
-        return;
 
     if (psFillArrowArray->nMemLimit == 0)
         psFillArrowArray->nMemLimit = OGRArrowArrayHelper::GetMemLimit();
     const auto nMemLimit = psFillArrowArray->nMemLimit;
     const int SQLITE_MAX_FUNCTION_ARG =
         sqlite3_limit(psFillArrowArray->hDB, SQLITE_LIMIT_FUNCTION_ARG, -1);
+    const bool bDateTimeAsString = psFillArrowArray->bDateTimeAsString;
 begin:
-    const int iFeat = psFillArrowArray->nCountRows;
-    auto psHelper = psFillArrowArray->psHelper.get();
+    int iFeat;
+    OGRArrowArrayHelper *psHelper;
+    {
+        std::unique_lock<std::mutex> oLock(psFillArrowArray->oMutex);
+        iFeat = psFillArrowArray->nCountRows;
+        psHelper = psFillArrowArray->psHelper.get();
+    }
     int iCol = 0;
     const int iFieldStart = sqlite3_value_int(argv[iCol]);
     ++iCol;
@@ -7621,13 +7960,41 @@ begin:
             if (nBlobSize >= 8 && pabyBlob && pabyBlob[0] == 'G' &&
                 pabyBlob[1] == 'P')
             {
-                /* Read header */
-                OGRErr err = GPkgHeaderFromWKB(pabyBlob, nBlobSize, &oHeader);
-                if (err == OGRERR_NONE)
+                if (psFillArrowArray->poLayer->m_bUndoDiscardCoordLSBOnReading)
                 {
-                    /* WKB pointer */
-                    pabyWkb = pabyBlob + oHeader.nHeaderLen;
-                    nWKBSize = nBlobSize - oHeader.nHeaderLen;
+                    OGRGeometry *poGeomPtr =
+                        GPkgGeometryToOGR(pabyBlob, nBlobSize, nullptr);
+                    if (poGeomPtr)
+                    {
+                        poGeomPtr->roundCoordinates(
+                            psFillArrowArray->poFeatureDefn->GetGeomFieldDefn(0)
+                                ->GetCoordinatePrecision());
+                        nWKBSize = poGeomPtr->WkbSize();
+                        abyWkb.resize(nWKBSize);
+                        if (poGeomPtr->exportToWkb(wkbNDR, abyWkb.data(),
+                                                   wkbVariantIso) !=
+                            OGRERR_NONE)
+                        {
+                            nWKBSize = 0;
+                        }
+                        else
+                        {
+                            pabyWkb = abyWkb.data();
+                        }
+                        delete poGeomPtr;
+                    }
+                }
+                else
+                {
+                    /* Read header */
+                    OGRErr err =
+                        GPkgHeaderFromWKB(pabyBlob, nBlobSize, &oHeader);
+                    if (err == OGRERR_NONE)
+                    {
+                        /* WKB pointer */
+                        pabyWkb = pabyBlob + oHeader.nHeaderLen;
+                        nWKBSize = nBlobSize - oHeader.nHeaderLen;
+                    }
                 }
             }
             else if (nBlobSize > 0 && pabyBlob)
@@ -7687,7 +8054,7 @@ begin:
                     }
                 }
 
-                if (psFillArrowArray->nCountRows > 0)
+                if (iFeat > 0)
                 {
                     auto panOffsets = static_cast<int32_t *>(
                         const_cast<void *>(psArray->buffers[1]));
@@ -7696,28 +8063,13 @@ begin:
                     if (nWKBSize <= nMemLimit &&
                         nWKBSize > nMemLimit - nCurLength)
                     {
-                        CPLDebug("GPKG",
-                                 "OGR_GPKG_FillArrowArray_Step(): premature "
-                                 "notification of %d features to consumer due "
-                                 "to too big array",
-                                 psFillArrowArray->nCountRows);
-                        psFillArrowArray->bMemoryLimitReached = true;
+                        DealWithTooBigArray(iFeat);
                         if (psFillArrowArray->bAsynchronousMode)
                         {
-                            std::unique_lock<std::mutex> oLock(
-                                psFillArrowArray->oMutex);
-                            psFillArrowArray->psHelper->Shrink(
-                                psFillArrowArray->nCountRows);
-                            psFillArrowArray->oCV.notify_one();
-                            while (psFillArrowArray->nCountRows > 0)
-                            {
-                                psFillArrowArray->oCV.wait(oLock);
-                            }
                             goto begin;
                         }
                         else
                         {
-                            sqlite3_interrupt(psFillArrowArray->hDB);
                             return;
                         }
                     }
@@ -7825,7 +8177,7 @@ begin:
                 const void *pabyData = sqlite3_value_blob(argv[iCol]);
                 if (pabyData != nullptr || nBytes == 0)
                 {
-                    if (psFillArrowArray->nCountRows > 0)
+                    if (iFeat > 0)
                     {
                         auto panOffsets = static_cast<int32_t *>(
                             const_cast<void *>(psArray->buffers[1]));
@@ -7834,28 +8186,13 @@ begin:
                         if (nBytes <= nMemLimit &&
                             nBytes > nMemLimit - nCurLength)
                         {
-                            CPLDebug("GPKG",
-                                     "OGR_GPKG_FillArrowArray_Step(): "
-                                     "premature notification of %d features to "
-                                     "consumer due to too big array",
-                                     psFillArrowArray->nCountRows);
-                            psFillArrowArray->bMemoryLimitReached = true;
+                            DealWithTooBigArray(iFeat);
                             if (psFillArrowArray->bAsynchronousMode)
                             {
-                                std::unique_lock<std::mutex> oLock(
-                                    psFillArrowArray->oMutex);
-                                psFillArrowArray->psHelper->Shrink(
-                                    psFillArrowArray->nCountRows);
-                                psFillArrowArray->oCV.notify_one();
-                                while (psFillArrowArray->nCountRows > 0)
-                                {
-                                    psFillArrowArray->oCV.wait(oLock);
-                                }
                                 goto begin;
                             }
                             else
                             {
-                                sqlite3_interrupt(psFillArrowArray->hDB);
                                 return;
                             }
                         }
@@ -7894,18 +8231,25 @@ begin:
 
             case OFTDateTime:
             {
-                OGRField ogrField;
-                const auto pszTxt = reinterpret_cast<const char *>(
-                    sqlite3_value_text(argv[iCol]));
-                if (pszTxt != nullptr &&
-                    psFillArrowArray->poLayer->ParseDateTimeField(
-                        pszTxt, &ogrField, poFieldDefn, nFID))
+                if (!bDateTimeAsString)
                 {
-                    psHelper->SetDateTime(
-                        psArray, iFeat, psFillArrowArray->brokenDown,
-                        psHelper->m_anTZFlags[iField], ogrField);
+                    OGRField ogrField;
+                    const auto pszTxt = reinterpret_cast<const char *>(
+                        sqlite3_value_text(argv[iCol]));
+                    if (pszTxt != nullptr &&
+                        psFillArrowArray->poLayer->ParseDateTimeField(
+                            pszTxt, &ogrField, poFieldDefn, nFID))
+                    {
+                        psHelper->SetDateTime(
+                            psArray, iFeat, psFillArrowArray->brokenDown,
+                            psHelper->m_anTZFlags[iField], ogrField);
+                    }
+                    break;
                 }
-                break;
+                else
+                {
+                    [[fallthrough]];
+                }
             }
 
             case OFTString:
@@ -7915,7 +8259,7 @@ begin:
                 if (pszTxt != nullptr)
                 {
                     const size_t nBytes = strlen(pszTxt);
-                    if (psFillArrowArray->nCountRows > 0)
+                    if (iFeat > 0)
                     {
                         auto panOffsets = static_cast<int32_t *>(
                             const_cast<void *>(psArray->buffers[1]));
@@ -7924,28 +8268,13 @@ begin:
                         if (nBytes <= nMemLimit &&
                             nBytes > nMemLimit - nCurLength)
                         {
-                            CPLDebug("GPKG",
-                                     "OGR_GPKG_FillArrowArray_Step(): "
-                                     "premature notification of %d features to "
-                                     "consumer due to too big array",
-                                     psFillArrowArray->nCountRows);
-                            psFillArrowArray->bMemoryLimitReached = true;
+                            DealWithTooBigArray(iFeat);
                             if (psFillArrowArray->bAsynchronousMode)
                             {
-                                std::unique_lock<std::mutex> oLock(
-                                    psFillArrowArray->oMutex);
-                                psFillArrowArray->psHelper->Shrink(
-                                    psFillArrowArray->nCountRows);
-                                psFillArrowArray->oCV.notify_one();
-                                while (psFillArrowArray->nCountRows > 0)
-                                {
-                                    psFillArrowArray->oCV.wait(oLock);
-                                }
                                 goto begin;
                             }
                             else
                             {
-                                sqlite3_interrupt(psFillArrowArray->hDB);
                                 return;
                             }
                         }
@@ -7975,12 +8304,14 @@ begin:
     }
 
     if (iField == psHelper->m_nFieldCount)
+    {
+        std::unique_lock<std::mutex> oLock(psFillArrowArray->oMutex);
         psFillArrowArray->nCountRows++;
+    }
     return;
 
 error:
     sqlite3_interrupt(psFillArrowArray->hDB);
-    psFillArrowArray->bErrorOccurred = true;
 }
 
 /************************************************************************/
@@ -8002,12 +8333,16 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronous(
 
     m_bGetNextArrowArrayCalledSinceResetReading = true;
 
-    if (m_poFillArrowArray && m_poFillArrowArray->bIsFinished)
+    if (m_poFillArrowArray)
     {
-        return 0;
+        std::lock_guard oLock(m_poFillArrowArray->oMutex);
+        if (m_poFillArrowArray->bIsFinished)
+        {
+            return 0;
+        }
     }
 
-    auto psHelper = cpl::make_unique<OGRArrowArrayHelper>(
+    auto psHelper = std::make_unique<OGRArrowArrayHelper>(
         m_poDS, m_poFeatureDefn, m_aosArrowArrayStreamOptions, out_array);
     if (out_array->release == nullptr)
     {
@@ -8049,18 +8384,16 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronous(
         }
 
         m_poFillArrowArray =
-            cpl::make_unique<OGRGPKGTableLayerFillArrowArray>();
+            std::make_unique<OGRGPKGTableLayerFillArrowArray>();
         m_poFillArrowArray->psHelper = std::move(psHelper);
-        m_poFillArrowArray->nCountRows = 0;
-        m_poFillArrowArray->bErrorOccurred = false;
+        m_poFillArrowArray->bDateTimeAsString =
+            m_aosArrowArrayStreamOptions.FetchBool(GAS_OPT_DATETIME_AS_STRING,
+                                                   false);
         m_poFillArrowArray->poFeatureDefn = m_poFeatureDefn;
         m_poFillArrowArray->poLayer = this;
         m_poFillArrowArray->hDB = m_poDS->GetDB();
         memset(&m_poFillArrowArray->brokenDown, 0,
                sizeof(m_poFillArrowArray->brokenDown));
-        m_poFillArrowArray->nMaxBatchSize =
-            OGRArrowArrayHelper::GetMaxFeaturesInBatch(
-                m_aosArrowArrayStreamOptions);
         m_poFillArrowArray->bAsynchronousMode = true;
         if (m_poFilterGeom)
             m_poFillArrowArray->poLayerForFilterGeom = this;
@@ -8081,7 +8414,7 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronous(
     }
     else
     {
-        std::lock_guard<std::mutex> oLock(m_poFillArrowArray->oMutex);
+        std::lock_guard oLock(m_poFillArrowArray->oMutex);
         if (m_poFillArrowArray->bErrorOccurred)
         {
             CPLError(CE_Failure, CPLE_AppDefined, "%s",
@@ -8093,30 +8426,39 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronous(
         // Resume worker thread
         m_poFillArrowArray->psHelper = std::move(psHelper);
         m_poFillArrowArray->nCountRows = 0;
+        m_poFillArrowArray->bThreadReady = false;
+        m_poFillArrowArray->bMemoryLimitReached = false;
         m_poFillArrowArray->oCV.notify_one();
     }
 
     // Wait for GetNextArrowArrayAsynchronousWorker() /
     // OGR_GPKG_FillArrowArray_Step() to have generated a result set (or an
     // error)
+    bool bIsFinished;
+    std::string osErrorMsg;
     {
         std::unique_lock<std::mutex> oLock(m_poFillArrowArray->oMutex);
-        while (m_poFillArrowArray->nCountRows == 0 &&
-               !m_poFillArrowArray->bIsFinished)
+        while (!m_poFillArrowArray->bThreadReady)
         {
             m_poFillArrowArray->oCV.wait(oLock);
         }
+        CPLAssert(m_poFillArrowArray->bErrorOccurred ||
+                  m_poFillArrowArray->bMemoryLimitReached ||
+                  m_poFillArrowArray->bIsFinished ||
+                  m_poFillArrowArray->nCountRows ==
+                      m_poFillArrowArray->psHelper->m_nMaxBatchSize);
+        bIsFinished = m_poFillArrowArray->bIsFinished;
+        osErrorMsg = m_poFillArrowArray->osErrorMsg;
     }
 
     if (m_poFillArrowArray->bErrorOccurred)
     {
         m_oThreadNextArrowArray.join();
-        CPLError(CE_Failure, CPLE_AppDefined, "%s",
-                 m_poFillArrowArray->osErrorMsg.c_str());
+        CPLError(CE_Failure, CPLE_AppDefined, "%s", osErrorMsg.c_str());
         m_poFillArrowArray->psHelper->ClearArray();
         return EIO;
     }
-    else if (m_poFillArrowArray->bIsFinished)
+    else if (bIsFinished)
     {
         m_oThreadNextArrowArray.join();
     }
@@ -8209,9 +8551,9 @@ void OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronousWorker()
                 bUseSpatialIndex = false;
             }
 
-            if (bUseSpatialIndex && !CPLIsInf(sEnvelope.MinX) &&
-                !CPLIsInf(sEnvelope.MinY) && !CPLIsInf(sEnvelope.MaxX) &&
-                !CPLIsInf(sEnvelope.MaxY))
+            if (bUseSpatialIndex && !std::isinf(sEnvelope.MinX) &&
+                !std::isinf(sEnvelope.MinY) && !std::isinf(sEnvelope.MaxX) &&
+                !std::isinf(sEnvelope.MaxY))
             {
                 osSQL +=
                     CPLSPrintf(" JOIN \"%s\" r "
@@ -8238,12 +8580,11 @@ void OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronousWorker()
     // CPLDebug("GPKG", "%s", osSQL.c_str());
 
     char *pszErrMsg = nullptr;
+    std::string osErrorMsg;
     if (sqlite3_exec(m_poDS->GetDB(), osSQL.c_str(), nullptr, nullptr,
                      &pszErrMsg) != SQLITE_OK)
     {
-        m_poFillArrowArray->bErrorOccurred = true;
-        m_poFillArrowArray->osErrorMsg =
-            pszErrMsg ? pszErrMsg : "unknown error";
+        osErrorMsg = pszErrMsg ? pszErrMsg : "unknown error";
     }
     sqlite3_free(pszErrMsg);
 
@@ -8252,8 +8593,11 @@ void OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronousWorker()
                             -1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nullptr,
                             nullptr, nullptr, nullptr);
 
-    std::lock_guard<std::mutex> oLock(m_poFillArrowArray->oMutex);
+    std::lock_guard oLock(m_poFillArrowArray->oMutex);
     m_poFillArrowArray->bIsFinished = true;
+    m_poFillArrowArray->bErrorOccurred = !osErrorMsg.empty();
+    m_poFillArrowArray->osErrorMsg = std::move(osErrorMsg);
+
     if (m_poFillArrowArray->nCountRows >= 0)
     {
         m_poFillArrowArray->psHelper->Shrink(m_poFillArrowArray->nCountRows);
@@ -8262,6 +8606,7 @@ void OGRGeoPackageTableLayer::GetNextArrowArrayAsynchronousWorker()
             m_poFillArrowArray->psHelper->ClearArray();
         }
     }
+    m_poFillArrowArray->bThreadReady = true;
     m_poFillArrowArray->oCV.notify_one();
 }
 
@@ -8363,7 +8708,7 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
         const auto stopThread = [&task]()
         {
             {
-                std::lock_guard<std::mutex> oLock(task->m_oMutex);
+                std::lock_guard oLock(task->m_oMutex);
                 task->m_bStop = true;
                 task->m_oCV.notify_one();
             }
@@ -8393,7 +8738,13 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
                    sizeof(struct ArrowArray));
             memset(task->m_psArrowArray.get(), 0, sizeof(struct ArrowArray));
 
-            if (task->m_bMemoryLimitReached)
+            const bool bMemoryLimitReached = [&task]()
+            {
+                std::unique_lock oLock(task->m_oMutex);
+                return task->m_bMemoryLimitReached;
+            }();
+
+            if (bMemoryLimitReached)
             {
                 m_nIsCompatOfOptimizedGetNextArrowArray = false;
                 stopThread();
@@ -8413,7 +8764,7 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
                 {
                     // Wake-up thread with new task
                     {
-                        std::lock_guard<std::mutex> oLock(task->m_oMutex);
+                        std::lock_guard oLock(task->m_oMutex);
                         task->m_bFetchRows = true;
                         task->m_oCV.notify_one();
                     }
@@ -8466,11 +8817,11 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
         oOpenInfo.nOpenFlags = GDAL_OF_VECTOR;
         for (int iTask = 0; iTask < nMaxTasks; ++iTask)
         {
-            auto task = cpl::make_unique<ArrowArrayPrefetchTask>();
+            auto task = std::make_unique<ArrowArrayPrefetchTask>();
             task->m_iStartShapeId =
                 m_iNextShapeId +
                 static_cast<GIntBig>(iTask + 1) * nMaxBatchSize;
-            task->m_poDS = cpl::make_unique<GDALGeoPackageDataset>();
+            task->m_poDS = std::make_unique<GDALGeoPackageDataset>();
             if (!task->m_poDS->Open(&oOpenInfo, m_poDS->m_osFilenameInZip))
             {
                 break;
@@ -8492,13 +8843,14 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
             }
 
             task->m_poLayer = poOtherLayer;
-            task->m_psArrowArray = cpl::make_unique<struct ArrowArray>();
+            task->m_psArrowArray = std::make_unique<struct ArrowArray>();
             memset(task->m_psArrowArray.get(), 0, sizeof(struct ArrowArray));
 
             poOtherLayer->m_nTotalFeatureCount = m_nTotalFeatureCount;
             poOtherLayer->m_aosArrowArrayStreamOptions =
                 m_aosArrowArrayStreamOptions;
-            auto poOtherFDefn = poOtherLayer->GetLayerDefn();
+            OGRLayer *poOtherLayerAsLayer = poOtherLayer;
+            auto poOtherFDefn = poOtherLayerAsLayer->GetLayerDefn();
             for (int i = 0; i < m_poFeatureDefn->GetGeomFieldCount(); ++i)
             {
                 poOtherFDefn->GetGeomFieldDefn(i)->SetIgnored(
@@ -8515,7 +8867,7 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
             auto taskPtr = task.get();
             auto taskRunner = [taskPtr]()
             {
-                std::unique_lock<std::mutex> oLock(taskPtr->m_oMutex);
+                std::unique_lock oLock(taskPtr->m_oMutex);
                 do
                 {
                     taskPtr->m_bFetchRows = false;
@@ -8527,6 +8879,11 @@ int OGRGeoPackageTableLayer::GetNextArrowArray(struct ArrowArrayStream *stream,
                     if (taskPtr->m_bMemoryLimitReached)
                         break;
                     // cppcheck-suppress knownConditionTrueFalse
+                    // Coverity apparently is confused by the fact that we
+                    // use unique_lock here to guard access for m_bStop whereas
+                    // in other places we use a lock_guard, but there's nothing
+                    // wrong.
+                    // coverity[missing_lock:FALSE]
                     while (!taskPtr->m_bStop && !taskPtr->m_bFetchRows)
                     {
                         taskPtr->m_oCV.wait(oLock);
@@ -8579,7 +8936,7 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayInternal(
         return 0;
     }
 
-    auto psHelper = cpl::make_unique<OGRArrowArrayHelper>(
+    auto psHelper = std::make_unique<OGRArrowArrayHelper>(
         m_poDS, m_poFeatureDefn, m_aosArrowArrayStreamOptions, out_array);
     if (out_array->release == nullptr)
     {
@@ -8588,9 +8945,8 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayInternal(
 
     OGRGPKGTableLayerFillArrowArray sFillArrowArray;
     sFillArrowArray.psHelper = std::move(psHelper);
-    sFillArrowArray.nCountRows = 0;
-    sFillArrowArray.bMemoryLimitReached = false;
-    sFillArrowArray.bErrorOccurred = false;
+    sFillArrowArray.bDateTimeAsString = m_aosArrowArrayStreamOptions.FetchBool(
+        GAS_OPT_DATETIME_AS_STRING, false);
     sFillArrowArray.poFeatureDefn = m_poFeatureDefn;
     sFillArrowArray.poLayer = this;
     sFillArrowArray.hDB = m_poDS->GetDB();
@@ -8691,4 +9047,327 @@ int OGRGeoPackageTableLayer::GetNextArrowArrayInternal(
     m_iNextShapeId += sFillArrowArray.nCountRows;
 
     return 0;
+}
+
+/************************************************************************/
+/*               OGR_GPKG_GeometryExtent3DAggregate()                   */
+/************************************************************************/
+
+namespace
+{
+struct GeometryExtent3DAggregateContext
+{
+    sqlite3 *m_hDB = nullptr;
+    OGREnvelope3D m_oExtent3D;
+
+    explicit GeometryExtent3DAggregateContext(sqlite3 *hDB)
+        : m_hDB(hDB), m_oExtent3D()
+    {
+    }
+
+    GeometryExtent3DAggregateContext(const GeometryExtent3DAggregateContext &) =
+        delete;
+    GeometryExtent3DAggregateContext &
+    operator=(const GeometryExtent3DAggregateContext &) = delete;
+};
+
+}  // namespace
+
+static void OGR_GPKG_GeometryExtent3DAggregate_Step(sqlite3_context *pContext,
+                                                    int /*argc*/,
+                                                    sqlite3_value **argv)
+{
+    const GByte *pabyBLOB =
+        reinterpret_cast<const GByte *>(sqlite3_value_blob(argv[0]));
+
+    auto poContext = static_cast<GeometryExtent3DAggregateContext *>(
+        sqlite3_user_data(pContext));
+
+    if (pabyBLOB != nullptr)
+    {
+        GPkgHeader sHeader;
+        if (OGRGeoPackageGetHeader(pContext, 0, argv, &sHeader, true, true))
+        {
+            OGREnvelope3D extent3D;
+            extent3D.MinX = sHeader.MinX;
+            extent3D.MaxX = sHeader.MaxX;
+            extent3D.MinY = sHeader.MinY;
+            extent3D.MaxY = sHeader.MaxY;
+            extent3D.MinZ = sHeader.MinZ;
+            extent3D.MaxZ = sHeader.MaxZ;
+            poContext->m_oExtent3D.Merge(extent3D);
+        }
+        else if (!sHeader.bEmpty)
+        {
+            // Try also spatialite geometry blobs
+            const int nBLOBLen = sqlite3_value_bytes(argv[0]);
+            OGRGeometry *poGeom = nullptr;
+            if (OGRSQLiteImportSpatiaLiteGeometry(pabyBLOB, nBLOBLen,
+                                                  &poGeom) == OGRERR_NONE &&
+                poGeom && !poGeom->IsEmpty())
+            {
+                OGREnvelope3D extent3D;
+                poGeom->getEnvelope(&extent3D);
+                poContext->m_oExtent3D.Merge(extent3D);
+            }
+            delete poGeom;
+        }
+    }
+}
+
+static void OGR_GPKG_GeometryExtent3DAggregate_Finalize(sqlite3_context *)
+{
+}
+
+/************************************************************************/
+/*                            IGetExtent3D                              */
+/************************************************************************/
+OGRErr OGRGeoPackageTableLayer::IGetExtent3D(int iGeomField,
+                                             OGREnvelope3D *psExtent3D,
+                                             bool bForce)
+{
+
+    const OGRFeatureDefn *poDefn = GetLayerDefn();
+
+    /* -------------------------------------------------------------------- */
+    /*      Deferred actions, reset state.                                   */
+    /* -------------------------------------------------------------------- */
+    RunDeferredCreationIfNecessary();
+    if (!RunDeferredSpatialIndexUpdate())
+    {
+        return OGRERR_FAILURE;
+    }
+
+    if (m_nZFlag == 0 && m_soFilter.empty())
+    {
+        // If the layer doesn't contain any 3D geometry and no filter is set,
+        // we can fallback to the fast 2D GetExtent()
+        const OGRErr retVal{GetExtent(iGeomField, psExtent3D, bForce)};
+        psExtent3D->MinZ = std::numeric_limits<double>::infinity();
+        psExtent3D->MaxZ = -std::numeric_limits<double>::infinity();
+        return retVal;
+    }
+    else
+    {
+        *psExtent3D = OGREnvelope3D();
+    }
+
+    // For internal use only
+
+    GeometryExtent3DAggregateContext sContext(m_poDS->hDB);
+
+    CPLString osFuncName;
+    osFuncName.Printf("OGR_GPKG_GeometryExtent3DAggregate_INTERNAL_%p",
+                      &sContext);
+
+    sqlite3_create_function(m_poDS->hDB, osFuncName.c_str(), 1, SQLITE_UTF8,
+                            &sContext, nullptr,
+                            OGR_GPKG_GeometryExtent3DAggregate_Step,
+                            OGR_GPKG_GeometryExtent3DAggregate_Finalize);
+
+    char *pszSQL = sqlite3_mprintf(
+        "SELECT %s(\"%w\") FROM \"%w\"%s", osFuncName.c_str(),
+        poDefn->GetGeomFieldDefn(iGeomField)->GetNameRef(), m_pszTableName,
+        m_soFilter.empty() ? "" : (" WHERE " + m_soFilter).c_str());
+    char *pszErrMsg = nullptr;
+    const int rc =
+        sqlite3_exec(m_poDS->hDB, pszSQL, nullptr, nullptr, &(pszErrMsg));
+
+    // Delete function
+    sqlite3_create_function(m_poDS->GetDB(), osFuncName.c_str(), 1, SQLITE_UTF8,
+                            nullptr, nullptr, nullptr, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        if (rc != SQLITE_INTERRUPT)
+        {
+            CPLError(CE_Failure, CPLE_AppDefined, "sqlite3_exec(%s) failed: %s",
+                     pszSQL, pszErrMsg);
+        }
+        sqlite3_free(pszErrMsg);
+        sqlite3_free(pszSQL);
+        return OGRERR_FAILURE;
+    }
+    sqlite3_free(pszErrMsg);
+    sqlite3_free(pszSQL);
+
+    *psExtent3D = sContext.m_oExtent3D;
+
+    return OGRERR_NONE;
+}
+
+/************************************************************************/
+/*                           Truncate()                                 */
+/************************************************************************/
+
+/** Implements "DELETE FROM {table_name}" in an optimized way.
+ *
+ * Disable triggers if we detect that the only triggers on the table are ones
+ * under our control (i.e. the ones for the gpkg_ogr_contents table and the
+ * ones updating the RTree)
+ * And even if we cannot disable triggers, truncate the RTree before the main
+ * table, as this dramatically speeds up truncating the main table.
+ */
+OGRErr OGRGeoPackageTableLayer::Truncate()
+{
+    if (!m_poDS->GetUpdate())
+    {
+        CPLError(CE_Failure, CPLE_NotSupported, UNSUPPORTED_OP_READ_ONLY,
+                 "Truncate");
+        return OGRERR_FAILURE;
+    }
+
+    ResetReading();
+    SyncToDisk();
+
+    bool bOK = (m_poDS->SoftStartTransaction() == OGRERR_NONE);
+
+    struct ReenableTriggers
+    {
+        sqlite3 *m_hDB = nullptr;
+
+        explicit ReenableTriggers(sqlite3 *hDB) : m_hDB(hDB)
+        {
+        }
+
+        ~ReenableTriggers()
+        {
+            sqlite3_db_config(m_hDB, SQLITE_DBCONFIG_ENABLE_TRIGGER, 1,
+                              nullptr);
+        }
+        CPL_DISALLOW_COPY_ASSIGN(ReenableTriggers)
+    };
+
+    // to keep in top level scope!
+    std::unique_ptr<ReenableTriggers> reenableTriggers;
+
+    // Temporarily disable triggers for greater speed if we detect that the
+    // only triggers on the table are the RTree ones and the ones for the
+    // gpkg_ogr_contents table
+    if (bOK && m_bIsTable)
+    {
+        char *pszSQL = sqlite3_mprintf(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name = '%q' "
+            "AND name NOT IN ('trigger_insert_feature_count_%q',"
+            "'trigger_delete_feature_count_%q') "
+            "AND name NOT LIKE 'rtree_%q_%%'",
+            m_pszTableName, m_pszTableName, m_pszTableName, m_pszTableName);
+        OGRErr eErr = OGRERR_NONE;
+        if (SQLGetInteger(m_poDS->GetDB(), pszSQL, &eErr) == 0 &&
+            eErr == OGRERR_NONE)
+        {
+            int nEnableTriggerOldVal = -1;
+            sqlite3_db_config(m_poDS->GetDB(), SQLITE_DBCONFIG_ENABLE_TRIGGER,
+                              -1, &nEnableTriggerOldVal);
+            if (nEnableTriggerOldVal == 1)
+            {
+                int nNewVal = -1;
+                sqlite3_db_config(m_poDS->GetDB(),
+                                  SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, &nNewVal);
+                if (nNewVal == 0)
+                {
+                    CPLDebugOnly("GPKG",
+                                 "Disabling triggers during truncation of %s",
+                                 m_pszTableName);
+                    reenableTriggers =
+                        std::make_unique<ReenableTriggers>(m_poDS->GetDB());
+                    CPL_IGNORE_RET_VAL(reenableTriggers);  // to please cppcheck
+                }
+            }
+        }
+        sqlite3_free(pszSQL);
+    }
+
+    char *pszErrMsg = nullptr;
+    if (bOK && m_bIsTable && HasSpatialIndex())
+    {
+        // Manually clean the 3 tables that are used by the RTree:
+        // - rtree_{tablename}_{geom}_node: all rows, but nodeno = 1 for which
+        //   we reset the 'data' field to a zero blob of the same size
+        // - rtree_{tablename}_{geom}_parent: all rows
+        // - rtree_{tablename}_{geom}_rowid: all rows
+
+        const char *pszT = m_pszTableName;
+        const char *pszC = m_poFeatureDefn->GetGeomFieldDefn(0)->GetNameRef();
+
+        m_osRTreeName = "rtree_";
+        m_osRTreeName += pszT;
+        m_osRTreeName += "_";
+        m_osRTreeName += pszC;
+
+        {
+            char *pszSQL =
+                sqlite3_mprintf("DELETE FROM \"%w_node\" WHERE nodeno > 1;"
+                                "DELETE FROM \"%w_parent\"; "
+                                "DELETE FROM \"%w_rowid\"",
+                                m_osRTreeName.c_str(), m_osRTreeName.c_str(),
+                                m_osRTreeName.c_str());
+            bOK = sqlite3_exec(m_poDS->hDB, pszSQL, nullptr, nullptr,
+                               &pszErrMsg) == SQLITE_OK;
+            sqlite3_free(pszSQL);
+        }
+
+        if (bOK)
+        {
+            char *pszSQL = sqlite3_mprintf(
+                "SELECT length(data) FROM \"%w_node\" WHERE nodeno = 1",
+                m_osRTreeName.c_str());
+            const int nBlobSize =
+                SQLGetInteger(m_poDS->GetDB(), pszSQL, nullptr);
+            sqlite3_free(pszSQL);
+
+            pszSQL = sqlite3_mprintf(
+                "UPDATE \"%w_node\" SET data = zeroblob(%d) WHERE nodeno = 1",
+                m_osRTreeName.c_str(), nBlobSize);
+            bOK = sqlite3_exec(m_poDS->hDB, pszSQL, nullptr, nullptr,
+                               &pszErrMsg) == SQLITE_OK;
+            sqlite3_free(pszSQL);
+        }
+    }
+
+    if (bOK)
+    {
+        // Truncate main table
+        char *pszSQL = sqlite3_mprintf("DELETE FROM \"%w\"", m_pszTableName);
+        bOK = sqlite3_exec(m_poDS->hDB, pszSQL, nullptr, nullptr, &pszErrMsg) ==
+              SQLITE_OK;
+        sqlite3_free(pszSQL);
+    }
+
+#ifdef ENABLE_GPKG_OGR_CONTENTS
+    // Reset feature count
+    if (bOK && m_poDS->m_bHasGPKGOGRContents)
+    {
+        char *pszSQL =
+            sqlite3_mprintf("UPDATE gpkg_ogr_contents SET feature_count = 0 "
+                            "WHERE lower(table_name) = lower('%q')",
+                            m_pszTableName);
+        bOK = sqlite3_exec(m_poDS->hDB, pszSQL, nullptr, nullptr, &pszErrMsg) ==
+              SQLITE_OK;
+        sqlite3_free(pszSQL);
+    }
+
+    if (bOK)
+    {
+        m_nTotalFeatureCount = 0;
+    }
+#endif
+
+    if (bOK)
+    {
+        m_poDS->SoftCommitTransaction();
+    }
+    else
+    {
+        m_poDS->SoftRollbackTransaction();
+#ifdef ENABLE_GPKG_OGR_CONTENTS
+        DisableFeatureCount();
+#endif
+        CPLError(CE_Failure, CPLE_AppDefined, "Truncate(%s) failed: %s",
+                 m_pszTableName, pszErrMsg ? pszErrMsg : "(unknown reason)");
+    }
+    sqlite3_free(pszErrMsg);
+
+    return bOK ? OGRERR_NONE : OGRERR_FAILURE;
 }

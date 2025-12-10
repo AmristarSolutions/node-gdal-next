@@ -1,5 +1,4 @@
 /******************************************************************************
- * $Id$
  *
  * Project:  Oracle Spatial Driver
  * Purpose:  Oracle Spatial OGR Driver Declarations.
@@ -8,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2002, Frank Warmerdam <warmerdam@pobox.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef OGR_OCI_H_INCLUDED
@@ -33,6 +16,9 @@
 #include "ogrsf_frmts.h"
 #include "oci.h"
 #include "cpl_error.h"
+
+#include <map>
+#include <set>
 
 /* -------------------------------------------------------------------- */
 /*      Low level Oracle spatial declarations.                          */
@@ -94,7 +80,7 @@ typedef struct
 /************************************************************************/
 /*                            OGROCISession                             */
 /************************************************************************/
-class CPL_DLL OGROCISession
+class CPL_DLL OGROCISession final
 {
   public:
     OCIEnv *hEnv;
@@ -113,7 +99,7 @@ class CPL_DLL OGROCISession
 
   public:
     OGROCISession();
-    virtual ~OGROCISession();
+    ~OGROCISession();
 
     int EstablishSession(const char *pszUserid, const char *pszPassword,
                          const char *pszDatabase);
@@ -140,16 +126,17 @@ OGROCISession CPL_DLL *OGRGetOCISession(const char *pszUserid,
 /************************************************************************/
 /*                           OGROCIStatement                            */
 /************************************************************************/
-class CPL_DLL OGROCIStatement
+class CPL_DLL OGROCIStatement final
 {
   public:
     explicit OGROCIStatement(OGROCISession *);
-    virtual ~OGROCIStatement();
+    ~OGROCIStatement();
 
     OCIStmt *GetStatement()
     {
         return hStatement;
     }
+
     CPLErr BindScalar(const char *pszPlaceName, void *pData, int nDataLen,
                       int nSQLType, sb2 *paeInd = nullptr);
     CPLErr BindString(const char *pszPlaceName, const char *pszData,
@@ -193,7 +180,7 @@ class CPL_DLL OGROCIStatement
 /************************************************************************/
 /*                           OGROCIStringBuf                            */
 /************************************************************************/
-class OGROCIStringBuf
+class OGROCIStringBuf final
 {
     char *pszString;
     int nLen;
@@ -212,11 +199,13 @@ class OGROCIStringBuf
     char *StealString();
 
     char GetLast();
+
     char *GetEnd()
     {
         UpdateEnd();
         return pszString + nLen;
     }
+
     char *GetString()
     {
         return pszString;
@@ -234,11 +223,11 @@ class OGROCIDataSource;
 class OGROCILayer CPL_NON_FINAL : public OGRLayer
 {
   protected:
+    OGROCIDataSource *poDS;
+
     OGRFeatureDefn *poFeatureDefn;
 
     int iNextShapeId;
-
-    OGROCIDataSource *poDS;
 
     char *pszQueryStatement;
 
@@ -257,6 +246,8 @@ class OGROCILayer CPL_NON_FINAL : public OGRLayer
     char *pszFIDName;
     int iFIDColumn;
 
+    std::set<int> setFieldIndexWithTimeStampWithTZ{};
+
     OGRGeometry *TranslateGeometry();
     OGRGeometry *TranslateGeometryElement(int *piElement, int nGType,
                                           int nDimension, int nEType,
@@ -269,27 +260,32 @@ class OGROCILayer CPL_NON_FINAL : public OGRLayer
                         double *pdfY, double *pdfZ);
 
   public:
-    OGROCILayer();
-    virtual ~OGROCILayer();
+    explicit OGROCILayer(OGROCIDataSource *poDSIn);
+    ~OGROCILayer() override;
+
     virtual int FindFieldIndex(const char *pszFieldName,
                                int bExactMatch) override
     {
         return OGRLayer::FindFieldIndex(pszFieldName, bExactMatch);
     }
 
-    virtual void ResetReading() override;
+    void ResetReading() override;
     virtual OGRFeature *GetNextRawFeature();
-    virtual OGRFeature *GetNextFeature() override;
+    OGRFeature *GetNextFeature() override;
 
-    OGRFeatureDefn *GetLayerDefn() override
+    using OGRLayer::GetLayerDefn;
+
+    const OGRFeatureDefn *GetLayerDefn() const override
     {
         return poFeatureDefn;
     }
 
-    virtual int TestCapability(const char *) override;
+    int TestCapability(const char *) const override;
 
-    virtual const char *GetFIDColumn() override;
-    virtual const char *GetGeometryColumn() override;
+    const char *GetFIDColumn() const override;
+    const char *GetGeometryColumn() const override;
+
+    GDALDataset *GetDataset() override;
 
     int LookupTableSRID();
 };
@@ -331,31 +327,35 @@ class OGROCIWritableLayer CPL_NON_FINAL : public OGROCILayer
 
     void ParseDIMINFO(const char *, double *, double *, double *);
 
-    OGROCIWritableLayer();
-    virtual ~OGROCIWritableLayer();
+    explicit OGROCIWritableLayer(OGROCIDataSource *poDSIn);
+    ~OGROCIWritableLayer() override;
 
   public:
-    virtual OGRSpatialReference *GetSpatialRef() override
+    const OGRSpatialReference *GetSpatialRef() const override
     {
         return poSRS;
     }
-    virtual OGRErr CreateField(OGRFieldDefn *poField,
+
+    virtual OGRErr CreateField(const OGRFieldDefn *poField,
                                int bApproxOK = TRUE) override;
     virtual int FindFieldIndex(const char *pszFieldName,
                                int bExactMatch) override;
 
     // following methods are not base class overrides
-    void SetOptions(char **);
+    void SetOptions(CSLConstList);
 
     void SetDimension(int);
+
     void SetLaunderFlag(int bFlag)
     {
         bLaunderColumnNames = bFlag;
     }
+
     void SetPrecisionFlag(int bFlag)
     {
         bPreservePrecision = bFlag;
     }
+
     void SetDefaultStringSize(int nSize)
     {
         nDefaultStringSize = nSize;
@@ -390,41 +390,33 @@ class OGROCILoaderLayer final : public OGROCIWritableLayer
 
     OGRErr WriteFeatureStreamMode(OGRFeature *);
     OGRErr WriteFeatureVariableMode(OGRFeature *);
-    // cppcheck-suppress functionStatic
-    OGRErr WriteFeatureBinaryMode(OGRFeature *);
+
+    static OGRErr WriteFeatureBinaryMode(OGRFeature *);
 
   public:
     OGROCILoaderLayer(OGROCIDataSource *, const char *pszName,
                       const char *pszGeomCol, int nSRID,
                       const char *pszLoaderFile);
-    virtual ~OGROCILoaderLayer();
+    ~OGROCILoaderLayer() override;
 
-    virtual void ResetReading() override;
-    virtual GIntBig GetFeatureCount(int) override;
+    void ResetReading() override;
+    GIntBig GetFeatureCount(int) override;
 
-    virtual void SetSpatialFilter(OGRGeometry *) override
-    {
-    }
-    virtual void SetSpatialFilter(int iGeomField, OGRGeometry *poGeom) override
-    {
-        OGRLayer::SetSpatialFilter(iGeomField, poGeom);
-    }
-
-    virtual OGRErr SetAttributeFilter(const char *) override
+    OGRErr SetAttributeFilter(const char *) override
     {
         return OGRERR_UNSUPPORTED_OPERATION;
     }
 
-    virtual OGRFeature *GetNextFeature() override;
+    OGRFeature *GetNextFeature() override;
 
-    virtual OGRErr ICreateFeature(OGRFeature *poFeature) override;
+    OGRErr ICreateFeature(OGRFeature *poFeature) override;
 
-    virtual OGRSpatialReference *GetSpatialRef() override
+    const OGRSpatialReference *GetSpatialRef() const override
     {
         return poSRS;
     }
 
-    virtual int TestCapability(const char *) override;
+    int TestCapability(const char *) const override;
 };
 
 /************************************************************************/
@@ -491,36 +483,29 @@ class OGROCITableLayer final : public OGROCIWritableLayer
     OGROCITableLayer(OGROCIDataSource *, const char *pszName,
                      OGRwkbGeometryType eGType, int nSRID, int bUpdate,
                      int bNew);
-    virtual ~OGROCITableLayer();
+    ~OGROCITableLayer() override;
 
-    virtual void ResetReading() override;
-    virtual GIntBig GetFeatureCount(int) override;
+    void ResetReading() override;
+    GIntBig GetFeatureCount(int) override;
 
-    virtual void SetSpatialFilter(OGRGeometry *) override;
-    virtual void SetSpatialFilter(int iGeomField, OGRGeometry *poGeom) override
-    {
-        OGRLayer::SetSpatialFilter(iGeomField, poGeom);
-    }
+    OGRErr ISetSpatialFilter(int iGeomField,
+                             const OGRGeometry *poGeom) override;
 
-    virtual OGRErr SetAttributeFilter(const char *) override;
+    OGRErr SetAttributeFilter(const char *) override;
 
-    virtual OGRFeature *GetNextFeature() override;
-    virtual OGRFeature *GetFeature(GIntBig nFeatureId) override;
+    OGRFeature *GetNextFeature() override;
+    OGRFeature *GetFeature(GIntBig nFeatureId) override;
 
-    virtual OGRErr ISetFeature(OGRFeature *poFeature) override;
-    virtual OGRErr ICreateFeature(OGRFeature *poFeature) override;
-    virtual OGRErr DeleteFeature(GIntBig nFID) override;
+    OGRErr ISetFeature(OGRFeature *poFeature) override;
+    OGRErr ICreateFeature(OGRFeature *poFeature) override;
+    OGRErr DeleteFeature(GIntBig nFID) override;
 
-    virtual OGRErr GetExtent(OGREnvelope *psExtent, int bForce = TRUE) override;
-    virtual OGRErr GetExtent(int iGeomField, OGREnvelope *psExtent,
-                             int bForce) override
-    {
-        return OGRLayer::GetExtent(iGeomField, psExtent, bForce);
-    }
+    OGRErr IGetExtent(int iGeomField, OGREnvelope *psExtent,
+                      bool bForce) override;
 
-    virtual int TestCapability(const char *) override;
+    int TestCapability(const char *) const override;
 
-    virtual OGRErr SyncToDisk() override;
+    OGRErr SyncToDisk() override;
 
     // following methods are not base class overrides
     int IsValid()
@@ -542,19 +527,18 @@ class OGROCISelectLayer final : public OGROCILayer
   public:
     OGROCISelectLayer(OGROCIDataSource *, const char *pszName,
                       OGROCIStatement *poStatement);
-    ~OGROCISelectLayer();
+    ~OGROCISelectLayer() override;
 };
 
 /************************************************************************/
 /*                           OGROCIDataSource                           */
 /************************************************************************/
 
-class OGROCIDataSource final : public OGRDataSource
+class OGROCIDataSource final : public GDALDataset
 {
     OGROCILayer **papoLayers;
     int nLayers;
 
-    char *pszName;
     char *pszDBName;
 
     int bDSUpdate;
@@ -564,13 +548,13 @@ class OGROCIDataSource final : public OGRDataSource
 
     // We maintain a list of known SRID to reduce the number of trips to
     // the database to get SRSes.
-    int nKnownSRID;
-    int *panSRID;
-    OGRSpatialReference **papoSRS;
+    std::map<int,
+             std::unique_ptr<OGRSpatialReference, OGRSpatialReferenceReleaser>>
+        m_oSRSCache{};
 
   public:
     OGROCIDataSource();
-    virtual ~OGROCIDataSource();
+    ~OGROCIDataSource() override;
 
     OGROCISession *GetSession()
     {
@@ -582,34 +566,31 @@ class OGROCIDataSource final : public OGRDataSource
     int OpenTable(const char *pszTableName, int nSRID, int bUpdate,
                   int bTestOpen, char **papszOpenOptionsIn);
 
-    const char *GetName() override
-    {
-        return pszName;
-    }
-    int GetLayerCount() override
+    int GetLayerCount() const override
     {
         return nLayers;
     }
-    OGRLayer *GetLayer(int) override;
+
+    const OGRLayer *GetLayer(int) const override;
     OGRLayer *GetLayerByName(const char *pszName) override;
 
-    virtual OGRErr DeleteLayer(int) override;
-    virtual OGRLayer *ICreateLayer(const char *,
-                                   const OGRSpatialReference * = nullptr,
-                                   OGRwkbGeometryType = wkbUnknown,
-                                   char ** = nullptr) override;
+    OGRErr DeleteLayer(int) override;
 
-    int TestCapability(const char *) override;
+    OGRLayer *ICreateLayer(const char *pszName,
+                           const OGRGeomFieldDefn *poGeomFieldDefn,
+                           CSLConstList papszOptions) override;
+
+    int TestCapability(const char *) const override;
 
     void DeleteLayer(const char *);
 
     void TruncateLayer(const char *);
     void ValidateLayer(const char *);
 
-    virtual OGRLayer *ExecuteSQL(const char *pszSQLCommand,
-                                 OGRGeometry *poSpatialFilter,
-                                 const char *pszDialect) override;
-    virtual void ReleaseResultSet(OGRLayer *poLayer) override;
+    OGRLayer *ExecuteSQL(const char *pszSQLCommand,
+                         OGRGeometry *poSpatialFilter,
+                         const char *pszDialect) override;
+    void ReleaseResultSet(OGRLayer *poLayer) override;
 
     int FetchSRSId(const OGRSpatialReference *poSRS);
     OGRSpatialReference *FetchSRS(int nSRID);

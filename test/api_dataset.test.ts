@@ -4,10 +4,7 @@ import * as fs from 'fs'
 import * as cp from 'child_process'
 import { assert } from 'chai'
 import * as fileUtils from './utils/file'
-import * as chai from 'chai'
-import * as chaiAsPromised from 'chai-as-promised'
 import * as semver from 'semver'
-chai.use(chaiAsPromised)
 
 const NAD83_WKT =
   'PROJCS["NAD_1983_UTM_Zone_10N",' +
@@ -20,8 +17,7 @@ const NAD83_WKT =
   'UNIT["Meter",1.0]]'
 
 describe('gdal.Dataset', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   let ds: gdal.Dataset
   before(() => {
@@ -171,7 +167,7 @@ describe('gdal.Dataset', () => {
           const ds = gdal.open(`${__dirname}/data/sample.tif`)
           ds.close()
           assert.throws(() => {
-            for (const band of ds.bands) band
+            for (const band of ds.bands) void band
           })
         })
       })
@@ -207,19 +203,19 @@ describe('gdal.Dataset', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           assert.throws(() => {
             // In TypeScript these exceptions require disabling the type checks
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (ds.bands as any).create(42)
+            // @ts-expect-error voluntary error
+            ds.bands.create(42)
           }, /data type must be string/)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (ds.bands as any).create()
+            // @ts-expect-error voluntary error
+            ds.bands.create()
           }, /data type argument needed/)
         })
         it('should throw if the options cannot be parsed', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            ds.bands.create(gdal.GDT_Byte, 'invalid=true' as any)
+            // @ts-expect-error voluntary error
+            ds.bands.create(gdal.GDT_Byte, 'invalid=true')
           }, /String list must be an array or object/)
         })
       })
@@ -508,7 +504,11 @@ describe('gdal.Dataset', () => {
           assert.isNull(ds.srs)
 
           ds = gdal.open(`${__dirname}/data/shp/sample.shp`)
-          assert.isNull(ds.srs)
+          if (semver.gte(gdal.version, '3.12.0-beta1')) {
+            assert.isNotNull(ds.srs)
+          } else {
+            assert.isNull(ds.srs)
+          }
         })
         it('should throw if dataset is already closed', () => {
           const ds = gdal.open(`${__dirname}/data/dem_azimuth50_pa.img`)
@@ -537,8 +537,8 @@ describe('gdal.Dataset', () => {
         it('should throw when not an SpatialReference object', () => {
           const ds = gdal.open(`${__dirname}/data/sample.tif`)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            ds.srs = '`1`inoinawfawfian!@121' as any
+            // @ts-expect-error voluntary error
+            ds.srs = '`1`inoinawfawfian!@121'
           }, /srs must be SpatialReference object/)
         })
         it('should set projection', () => {
@@ -611,8 +611,8 @@ describe('gdal.Dataset', () => {
         it('should throw', () => {
           const ds = gdal.open(`${__dirname}/data/sample.tif`)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (ds as any).rasterSize = { x: 0, y: 0 }
+            // @ts-expect-error voluntary error
+            ds.rasterSize = { x: 0, y: 0 }
           }, /rasterSize is a read-only property/)
         })
       })
@@ -656,8 +656,8 @@ describe('gdal.Dataset', () => {
         it('should throw', () => {
           const ds = gdal.open(`${__dirname}/data/sample.tif`)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (ds as any).driver = null
+            // @ts-expect-error voluntary error
+            ds.driver = null
           })
         })
       })
@@ -831,8 +831,8 @@ describe('gdal.Dataset', () => {
           const tempFile = fileUtils.clone(`${__dirname}/data/sample.vrt`)
           const ds = gdal.open(tempFile)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            ds.geoTransform = [ 0, 1, 'bad_value' as any, 0, 0, 1 ]
+            // @ts-expect-error voluntary error
+            ds.geoTransform = [ 0, 1, 'bad_value', 0, 0, 1 ]
           })
           assert.throws(() => {
             ds.geoTransform = [ 0, 1 ]
@@ -843,8 +843,8 @@ describe('gdal.Dataset', () => {
         it('should throw if geotransform is not an array', () => {
           const ds = gdal.open(`${__dirname}/data/dem_azimuth50_pa.img`)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            ds.geoTransform = '42' as any
+            // @ts-expect-error voluntary error
+            ds.geoTransform = '42'
           })
         })
       })
@@ -871,6 +871,13 @@ describe('gdal.Dataset', () => {
         assert.throws(() => {
           ds.executeSQL('SELECT name FROM sample')
         })
+      })
+      it('should support SQLite dialect', () => {
+        const ds = gdal.open(`${__dirname}/data/shp/sample.shp`)
+        const result_set = ds.executeSQL('SELECT name FROM sample', undefined, 'SQLITE')
+
+        assert.instanceOf(result_set, gdal.Layer)
+        assert.deepEqual(result_set.fields.getNames(), [ 'name' ])
       })
     })
     describe('executeSQLAsync()', () => {
@@ -1030,7 +1037,7 @@ describe('gdal.Dataset', () => {
         const ds = gdal.open(tempFile, 'r+')
         try {
           ds.buildOverviews('NEAREST', [ 2, 4, -3 ])
-        } catch (e) {
+        } catch (_e) {
           /* ignore (see above) */
         }
         ds.close()
@@ -1040,8 +1047,8 @@ describe('gdal.Dataset', () => {
         const tempFile = fileUtils.clone(`${__dirname}/data/sample.tif`)
         const ds = gdal.open(tempFile, 'r+')
         assert.throws(() => {
-          /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-          ds.buildOverviews('NEAREST', [ 2, 4, {} as any ])
+        // @ts-expect-error voluntary error
+          ds.buildOverviews('NEAREST', [ 2, 4, {} ])
         })
         ds.close()
         gdal.vsimem.release(tempFile)
@@ -1069,8 +1076,8 @@ describe('gdal.Dataset', () => {
           const tempFile = fileUtils.clone(`${__dirname}/data/sample.tif`)
           const ds = gdal.open(tempFile, 'r+')
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            ds.buildOverviews('NEAREST', [ 2, 4, 8 ], [ {} as any ])
+            // @ts-expect-error voluntary error
+            ds.buildOverviews('NEAREST', [ 2, 4, 8 ], [ {} ])
           })
           ds.close()
           gdal.vsimem.release(tempFile)
@@ -1101,6 +1108,10 @@ describe('gdal.Dataset', () => {
           } })
           assert.isAbove(calls, 0)
           assert.equal(ds.bands.get(1).overviews.count(), 3)
+          // In GDAL overviews have a special Dataset, but
+          // in the JS bindings, they reference the main Dataset
+          assert.instanceOf(ds.bands.get(1).overviews.get(1).ds, gdal.Dataset)
+          assert.strictEqual(ds.bands.get(1).overviews.get(1).ds, ds)
           ds.close()
           gdal.vsimem.release(tempFile)
         })
@@ -1131,8 +1142,8 @@ describe('gdal.Dataset', () => {
       it('should throw if overview is not a number', () => {
         const tempFile = fileUtils.clone(`${__dirname}/data/sample.tif`)
         const ds = gdal.open(tempFile, 'r+')
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-        return assert.isRejected(ds.buildOverviewsAsync('NEAREST', [ 2, 4, {} as any ])).then(() => {
+        // @ts-expect-error voluntary error
+        return assert.isRejected(ds.buildOverviewsAsync('NEAREST', [ 2, 4, {} ])).then(() => {
           ds.close()
           gdal.vsimem.release(tempFile)
         })
@@ -1158,8 +1169,8 @@ describe('gdal.Dataset', () => {
         it('should throw if band id is not a number', () => {
           const tempFile = fileUtils.clone(`${__dirname}/data/sample.tif`)
           const ds = gdal.open(tempFile, 'r+')
-          /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-          return assert.isRejected(ds.buildOverviewsAsync('NEAREST', [ 2, 4, 8 ], [ {} as any ])).then(() => {
+          // @ts-expect-error voluntary error
+          return assert.isRejected(ds.buildOverviewsAsync('NEAREST', [ 2, 4, 8 ], [ {} ])).then(() => {
             ds.close()
             gdal.vsimem.release(tempFile)
           })

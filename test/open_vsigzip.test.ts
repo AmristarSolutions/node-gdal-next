@@ -1,13 +1,9 @@
 import * as gdal from 'gdal-async'
 import * as path from 'path'
-import * as chai from 'chai'
-const assert = chai.assert
-import * as chaiAsPromised from 'chai-as-promised'
-chai.use(chaiAsPromised)
+import { assert } from 'chai'
 
 describe('Open', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('vsigzip', () => {
     let filename, ds: gdal.Dataset
@@ -61,6 +57,7 @@ describe('Open', () => {
             featureCode: 15600,
             featureDescription: 'Water Feature'
           })
+          layer2.features.first()
         })
       })
     })

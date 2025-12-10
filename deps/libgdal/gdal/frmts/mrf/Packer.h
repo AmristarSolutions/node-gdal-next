@@ -19,6 +19,7 @@ Contributors:  Lucian Plesea
 #include "marfa.h"
 
 NAMESPACE_MRF_START
+
 typedef struct storage_manager
 {
     char *buffer;
@@ -27,12 +28,11 @@ typedef struct storage_manager
 
 // A base class that provides import and export functions based on storage
 // managers Default implementation is a straight copy
-class Packer
+class Packer /* non final */
 {
   public:
-    virtual ~Packer()
-    {
-    }
+    virtual ~Packer();
+
     virtual int load(storage_manager *src, storage_manager *dst)
     {
         if (dst->size < src->size)
@@ -47,5 +47,6 @@ class Packer
         return load(src, dst);
     }
 };
+
 NAMESPACE_MRF_END
 #endif

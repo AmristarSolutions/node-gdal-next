@@ -1,4 +1,4 @@
-import * as gdal from 'gdal-async'
+import gdal from 'gdal-async'
 import { assert } from 'chai'
 import * as path from 'path'
 import * as fs from 'fs'
@@ -11,8 +11,7 @@ if (process.env.GDAL_DATA !== undefined) {
 }
 
 describe('gdal', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('"lastError" property', () => {
     describe('get()', () => {
@@ -21,9 +20,8 @@ describe('gdal', () => {
         assert.isNull(gdal.lastError)
       })
       it('should return an object normally', () => {
-        // This is not a public API
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-        (gdal as any)._triggerCPLError()
+        // @ts-expect-error not a public API
+        gdal._triggerCPLError()
 
         assert.deepEqual(gdal.lastError, {
           code: gdal.CPLE_AppDefined,
@@ -34,18 +32,16 @@ describe('gdal', () => {
     })
     describe('set()', () => {
       it('should allow reset by setting to null', () => {
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-        (gdal as any)._triggerCPLError()
+        // @ts-expect-error not a public API
+        gdal._triggerCPLError()
 
-        assert.equal(!!gdal.lastError, true);
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-        (gdal as any).lastError = null
+        assert.equal(!!gdal.lastError, true)
+        gdal.lastError = null
         assert.isNull(gdal.lastError)
       })
       it('should throw when not null', () => {
         assert.throws(() => {
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-          (gdal as any).lastError = {}
+          gdal.lastError = {}
         }, /null/)
       })
     })
@@ -81,7 +77,6 @@ describe('gdal', () => {
         const env = Object.assign({}, process.env)
         env.GDAL_DATA = 'bogus'
         const gdalJS = fs.existsSync('./lib/gdal.js') ? './lib/gdal.js' : 'gdal-async'
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
         // The manual delete/global.gc() allows for error-free unit testing of the ASAN build
         const command =
           `"const gdal = require('${gdalJS}'); console.log(gdal.config.get('GDAL_DATA')); delete gdal.drivers; global.gc();"`
@@ -105,8 +100,8 @@ describe('gdal', () => {
   describe('decToDMS()', () => {
     it('should throw when axis not provided', () => {
       assert.throws(() => {
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-        (gdal as any).decToDMS(12.2)
+        // @ts-expect-error voluntary error
+        gdal.decToDMS(12.2)
       })
     })
     it('should return correct result', () => {

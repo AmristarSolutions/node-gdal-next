@@ -247,7 +247,7 @@ template <> void AverageByFour<float>(float *buff, int xsz, int ysz, float ndv)
 #define use(valp)                                                              \
     if (*valp != ndv)                                                          \
     {                                                                          \
-        acc += *valp;                                                          \
+        acc += double(*valp);                                                  \
         count += 1.0;                                                          \
     };                                                                         \
     valp++;
@@ -258,7 +258,7 @@ template <> void AverageByFour<float>(float *buff, int xsz, int ysz, float ndv)
 #undef use
             // Output value is eiher accumulator divided by count or the
             // NoDataValue
-            *obuff++ = float((count != 0.0) ? acc / count : ndv);
+            *obuff++ = (count != 0.0) ? float(acc / count) : ndv;
         }
         evenline += xsz * 2;  // Skips every other line
     }
@@ -465,20 +465,24 @@ CPLErr MRFDataset::PatchOverview(int BlockX, int BlockY, int Width, int Height,
 #define resample(T)                                                            \
     if (hasNoData)                                                             \
     {                                                                          \
-        count = MatchCount((T *)buffer.data(), 4 * tsz_x * tsz_y, T(ndv));     \
+        count = MatchCount(reinterpret_cast<T *>(buffer.data()),               \
+                           4 * tsz_x * tsz_y, T(ndv));                         \
         if (4 * tsz_x * tsz_y == count)                                        \
             bdst->FillBlock(buffer.data());                                    \
         else if (0 != count)                                                   \
-            AverageByFour((T *)buffer.data(), tsz_x, tsz_y, T(ndv));           \
+            AverageByFour(reinterpret_cast<T *>(buffer.data()), tsz_x, tsz_y,  \
+                          T(ndv));                                             \
     }                                                                          \
     if (0 == count)                                                            \
-        AverageByFour((T *)buffer.data(), tsz_x, tsz_y);                       \
+        AverageByFour(reinterpret_cast<T *>(buffer.data()), tsz_x, tsz_y);     \
     break;
 
                     switch (eDataType)
                     {
                         case GDT_Byte:
                             resample(GByte);
+                        case GDT_Int8:
+                            resample(GInt8);
                         case GDT_UInt16:
                             resample(GUInt16);
                         case GDT_Int16:
@@ -487,6 +491,10 @@ CPLErr MRFDataset::PatchOverview(int BlockX, int BlockY, int Width, int Height,
                             resample(GUInt32);
                         case GDT_Int32:
                             resample(GInt32);
+                        case GDT_UInt64:
+                            resample(GUInt64);
+                        case GDT_Int64:
+                            resample(GInt64);
                         case GDT_Float32:
                             resample(float);
                         case GDT_Float64:
@@ -503,19 +511,23 @@ CPLErr MRFDataset::PatchOverview(int BlockX, int BlockY, int Width, int Height,
 #define resample(T)                                                            \
     if (hasNoData)                                                             \
     {                                                                          \
-        count = MatchCount((T *)buffer.data(), 4 * tsz_x * tsz_y, T(ndv));     \
+        count = MatchCount(reinterpret_cast<T *>(buffer.data()),               \
+                           4 * tsz_x * tsz_y, T(ndv));                         \
         if (4 * tsz_x * tsz_y == count)                                        \
             bdst->FillBlock(buffer.data());                                    \
         else if (0 != count)                                                   \
-            NearByFour((T *)buffer.data(), tsz_x, tsz_y, T(ndv));              \
+            NearByFour(reinterpret_cast<T *>(buffer.data()), tsz_x, tsz_y,     \
+                       T(ndv));                                                \
     }                                                                          \
     if (0 == count)                                                            \
-        NearByFour((T *)buffer.data(), tsz_x, tsz_y);                          \
+        NearByFour(reinterpret_cast<T *>(buffer.data()), tsz_x, tsz_y);        \
     break;
                     switch (eDataType)
                     {
                         case GDT_Byte:
                             resample(GByte);
+                        case GDT_Int8:
+                            resample(GInt8);
                         case GDT_UInt16:
                             resample(GUInt16);
                         case GDT_Int16:
@@ -524,6 +536,10 @@ CPLErr MRFDataset::PatchOverview(int BlockX, int BlockY, int Width, int Height,
                             resample(GUInt32);
                         case GDT_Int32:
                             resample(GInt32);
+                        case GDT_UInt64:
+                            resample(GUInt64);
+                        case GDT_Int64:
+                            resample(GInt64);
                         case GDT_Float32:
                             resample(float);
                         case GDT_Float64:

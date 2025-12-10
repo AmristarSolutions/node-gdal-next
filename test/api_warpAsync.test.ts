@@ -1,13 +1,9 @@
 import * as gdal from 'gdal-async'
-import * as chaiAsPromised from 'chai-as-promised'
-import * as chai from 'chai'
-const assert = chai.assert
-chai.use(chaiAsPromised)
+import { assert } from 'chai'
 import * as semver from 'semver'
 
 describe('gdal', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('suggestedWarpOutputAsync()', () => {
     let src: gdal.Dataset
@@ -135,6 +131,7 @@ describe('gdal', () => {
 
       // transform cutline to source dataset px/line coordinates
       const geotransformer = new gdal.CoordinateTransformation(t_srs, src)
+      assert.isNotNull(cutline)
       cutline.transform(geotransformer)
 
       // compute output geotransform / dimensions

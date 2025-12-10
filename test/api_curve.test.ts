@@ -2,8 +2,7 @@ import { assert } from 'chai'
 import * as gdal from 'gdal-async'
 
 describe('gdal.CompoundCurve', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should be instantiable', () => {
     new gdal.CompoundCurve()
@@ -17,7 +16,7 @@ describe('gdal.CompoundCurve', () => {
     before(() => {
       try {
         compoundcurve = gdal.Geometry.fromWKT('COMPOUNDCURVE (CIRCULARSTRING (692012.37315768 594722.610031277,692057.127042054 594649.528941062,692067.186040178 594564.425636366),(692067.186040178 594564.425636366,692026.997800346 594156.751911029),CIRCULARSTRING (692026.997800346 594156.751911029,692061.574244064 594070.897749602,692151.782327678 594050.18617928))') as gdal.CompoundCurve
-      } catch (e) {
+      } catch (_e) {
         // ignore
       }
     })
@@ -92,8 +91,7 @@ describe('gdal.CompoundCurve', () => {
 })
 
 describe('gdal.MultiCurve', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should be instantiable', () => {
     new gdal.MultiCurve()

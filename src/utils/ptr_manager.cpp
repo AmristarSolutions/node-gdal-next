@@ -132,6 +132,10 @@ AsyncLock ObjectStore::lockDataset(long uid) {
   while (true) {
     auto parent = uidMap<GDALDataset *>.find(uid);
     if (parent == uidMap<GDALDataset *>.end()) { throw "Parent Dataset object has already been destroyed"; }
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 10)
+    // Do not lock thread-safe datasets
+    if (parent->second->ptr->IsThreadSafe(GDAL_OF_RASTER)) { return nullptr; }
+#endif
     int r = uv_sem_trywait(parent->second->async_lock.get());
     if (r == 0) { return parent->second->async_lock; }
     uv_cond_wait(&master_sleep, &master_lock);
@@ -148,8 +152,9 @@ vector<AsyncLock> ObjectStore::lockDatasets(vector<long> uids) {
   uv_scoped_mutex lock(&master_lock);
   while (true) {
     try {
-      vector<AsyncLock> locks = _tryLockDatasets(uids);
-      if (locks.size() > 0) { return locks; }
+      bool locked;
+      vector<AsyncLock> locks = _tryLockDatasets(uids, locked);
+      if (locked) { return locks; }
     } catch (const char *msg) { throw msg; }
     uv_cond_wait(&master_sleep, &master_lock);
   }
@@ -158,21 +163,38 @@ vector<AsyncLock> ObjectStore::lockDatasets(vector<long> uids) {
 /*
  * Acquire the lock only if it is free, do not block.
  */
-AsyncLock ObjectStore::tryLockDataset(long uid) {
-  if (uid == 0) return nullptr;
+AsyncLock ObjectStore::tryLockDataset(long uid, bool &result) {
+  if (uid == 0) {
+    result = true;
+    return nullptr;
+  }
   uv_scoped_mutex lock(&master_lock);
   auto parent = uidMap<GDALDataset *>.find(uid);
   if (parent == uidMap<GDALDataset *>.end()) { throw "Parent Dataset object has already been destroyed"; }
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 10)
+  if (parent->second->ptr->IsThreadSafe(GDAL_OF_RASTER)) {
+    result = true;
+    return nullptr;
+  }
+#endif
   int r = uv_sem_trywait(parent->second->async_lock.get());
-  if (r == 0) return parent->second->async_lock;
+  if (r == 0) {
+    result = true;
+    return parent->second->async_lock;
+  }
+  result = false;
   return nullptr;
 }
 
-vector<AsyncLock> ObjectStore::_tryLockDatasets(vector<long> uids) {
+vector<AsyncLock> ObjectStore::_tryLockDatasets(vector<long> uids, bool &result) {
   vector<AsyncLock> locks;
   for (long uid : uids) {
     auto parent = uidMap<GDALDataset *>.find(uid);
     if (parent == uidMap<GDALDataset *>.end()) { throw "Parent Dataset object has already been destroyed"; }
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 10)
+    // Skip locking thread-safe datasets
+    if (parent->second->ptr->IsThreadSafe(GDAL_OF_RASTER)) continue;
+#endif
     locks.push_back(parent->second->async_lock);
   }
   vector<AsyncLock> locked;
@@ -189,19 +211,23 @@ vector<AsyncLock> ObjectStore::_tryLockDatasets(vector<long> uids) {
       break;
     }
   }
-  if (r == 0) return locks;
+  if (r == 0) {
+    result = true;
+    return locks;
+  }
+  result = false;
   return {};
 }
 
 /*
  * Try to acquire several locks avoiding deadlocks without blocking.
  */
-vector<AsyncLock> ObjectStore::tryLockDatasets(vector<long> uids) {
+vector<AsyncLock> ObjectStore::tryLockDatasets(vector<long> uids, bool &result) {
   // There is lots of copying around here but these vectors are never longer than 3 elements
   sortUnique(uids);
   if (uids.size() == 0) return {};
   uv_scoped_mutex lock(&master_lock);
-  return _tryLockDatasets(uids);
+  return _tryLockDatasets(uids, result);
 }
 
 // The basic unit of the ObjectStore is the ObjectStoreItem<GDALPTR>
@@ -248,7 +274,7 @@ long ObjectStore::add(OGRLayer *ptr, Nan::Persistent<Object> &obj, long parent_u
 
 // Creating a Dataset object is a special case
 // It contains a lock (unless it is a dependant Dataset)
-long ObjectStore::add(GDALDataset *ptr, Nan::Persistent<Object> &obj, long parent_uid) {
+long ObjectStore::add(GDALDataset *ptr, Nan::Persistent<Object> &obj, long parent_uid, bool close) {
   long uid = ObjectStore::add<GDALDataset *>(ptr, obj, parent_uid);
   if (parent_uid == 0) {
     uidMap<GDALDataset *>[uid] -> async_lock = shared_ptr<uv_sem_t>(new uv_sem_t(), uv_sem_deleter());
@@ -256,6 +282,8 @@ long ObjectStore::add(GDALDataset *ptr, Nan::Persistent<Object> &obj, long paren
   } else {
     uidMap<GDALDataset *>[uid] -> async_lock = uidMap<GDALDataset *>[parent_uid] -> async_lock;
   }
+  // Is this an automatic Dataset that should not be closed?
+  uidMap<GDALDataset *>[uid] -> close = close;
   return uid;
 }
 
@@ -342,8 +370,12 @@ template <> void ObjectStore::dispose(shared_ptr<ObjectStoreItem<GDALDataset *>>
   while (!item->children.empty()) { do_dispose(item->children.back()); }
 
   if (item->ptr) {
-    LOG("Closing GDALDataset %ld [%p]", item->uid, item->ptr);
-    GDALClose(item->ptr);
+    if (item->close) {
+      LOG("Closing GDALDataset %ld [%p]", item->uid, item->ptr);
+      GDALClose(item->ptr);
+    } else {
+      LOG("Destroying GDALDataset without closing %ld [%p]", item->uid, item->ptr);
+    }
     item->ptr = nullptr;
   }
 }
@@ -373,6 +405,7 @@ template <> void ObjectStore::dispose(shared_ptr<ObjectStoreItem<OGRLayer *>> it
 
 // Generic disposal (called with the master lock held)
 template <typename GDALPTR> void ObjectStore::dispose(shared_ptr<ObjectStoreItem<GDALPTR>> item, bool) {
+  if (item == nullptr) return;
   ptrMap<GDALPTR>.erase(item->ptr);
   uidMap<GDALPTR>.erase(item->uid);
   if (item->parent != nullptr) { item->parent->children.remove(item->uid); }

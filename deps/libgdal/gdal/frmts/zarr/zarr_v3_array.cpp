@@ -7,31 +7,17 @@
  ******************************************************************************
  * Copyright (c) 2021, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
+#include "cpl_float.h"
 #include "cpl_vsi_virtual.h"
 #include "gdal_thread_pool.h"
 #include "zarr.h"
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -88,12 +74,12 @@ ZarrV3Array::~ZarrV3Array()
 /*                                Flush()                               */
 /************************************************************************/
 
-void ZarrV3Array::Flush()
+bool ZarrV3Array::Flush()
 {
     if (!m_bValid)
-        return;
+        return true;
 
-    ZarrV3Array::FlushDirtyTile();
+    bool ret = ZarrV3Array::FlushDirtyTile();
 
     if (!m_aoDims.empty())
     {
@@ -126,16 +112,19 @@ void ZarrV3Array::Flush()
 
     if (m_bDefinitionModified)
     {
-        Serialize(oAttrs);
+        if (!Serialize(oAttrs))
+            ret = false;
         m_bDefinitionModified = false;
     }
+
+    return ret;
 }
 
 /************************************************************************/
 /*                    ZarrV3Array::Serialize()                          */
 /************************************************************************/
 
-void ZarrV3Array::Serialize(const CPLJSONObject &oAttrs)
+bool ZarrV3Array::Serialize(const CPLJSONObject &oAttrs)
 {
     CPLJSONDocument oDoc;
     CPLJSONObject oRoot = oDoc.GetRoot();
@@ -177,7 +166,8 @@ void ZarrV3Array::Serialize(const CPLJSONObject &oAttrs)
 
     if (m_pabyNoData == nullptr)
     {
-        if (m_oType.GetNumericDataType() == GDT_Float32 ||
+        if (m_oType.GetNumericDataType() == GDT_Float16 ||
+            m_oType.GetNumericDataType() == GDT_Float32 ||
             m_oType.GetNumericDataType() == GDT_Float64)
         {
             oRoot.Add("fill_value", "NaN");
@@ -189,7 +179,8 @@ void ZarrV3Array::Serialize(const CPLJSONObject &oAttrs)
     }
     else
     {
-        if (m_oType.GetNumericDataType() == GDT_CFloat32 ||
+        if (m_oType.GetNumericDataType() == GDT_CFloat16 ||
+            m_oType.GetNumericDataType() == GDT_CFloat32 ||
             m_oType.GetNumericDataType() == GDT_CFloat64)
         {
             double adfNoDataValue[2];
@@ -250,7 +241,7 @@ void ZarrV3Array::Serialize(const CPLJSONObject &oAttrs)
 
     // TODO: codecs
 
-    oDoc.Save(m_osFilename);
+    return oDoc.Save(m_osFilename);
 }
 
 /************************************************************************/
@@ -402,42 +393,27 @@ bool ZarrV3Array::LoadTileData(const uint64_t *tileIndices, bool bUseMutex,
                      ->GetStreamingFilename(osFilename);
 
     // First if we have a tile presence cache, check tile presence from it
+    bool bEarlyRet;
     if (bUseMutex)
-        m_oMutex.lock();
-    auto poTilePresenceArray = OpenTilePresenceCache(false);
-    if (poTilePresenceArray)
     {
-        std::vector<GUInt64> anTileIdx(m_aoDims.size());
-        const std::vector<size_t> anCount(m_aoDims.size(), 1);
-        const std::vector<GInt64> anArrayStep(m_aoDims.size(), 0);
-        const std::vector<GPtrDiff_t> anBufferStride(m_aoDims.size(), 0);
-        const auto eByteDT = GDALExtendedDataType::Create(GDT_Byte);
-        for (size_t i = 0; i < m_aoDims.size(); ++i)
-        {
-            anTileIdx[i] = static_cast<GUInt64>(tileIndices[i]);
-        }
-        GByte byValue = 0;
-        if (poTilePresenceArray->Read(anTileIdx.data(), anCount.data(),
-                                      anArrayStep.data(), anBufferStride.data(),
-                                      eByteDT, &byValue) &&
-            byValue == 0)
-        {
-            if (bUseMutex)
-                m_oMutex.unlock();
-            CPLDebugOnly(ZARR_DEBUG_KEY, "Tile %s missing (=nodata)",
-                         osFilename.c_str());
-            bMissingTileOut = true;
-            return true;
-        }
+        std::lock_guard<std::mutex> oLock(m_oMutex);
+        bEarlyRet = IsTileMissingFromCacheInfo(osFilename, tileIndices);
     }
-    if (bUseMutex)
-        m_oMutex.unlock();
-
+    else
+    {
+        bEarlyRet = IsTileMissingFromCacheInfo(osFilename, tileIndices);
+    }
+    if (bEarlyRet)
+    {
+        bMissingTileOut = true;
+        return true;
+    }
     VSILFILE *fp = nullptr;
     // This is the number of files returned in a S3 directory listing operation
     constexpr uint64_t MAX_TILES_ALLOWED_FOR_DIRECTORY_LISTING = 1000;
     const char *const apszOpenOptions[] = {"IGNORE_FILENAME_RESTRICTIONS=YES",
                                            nullptr};
+    const auto nErrorBefore = CPLGetErrorCounter();
     if ((m_osDimSeparator == "/" && !m_anBlockSize.empty() &&
          m_anBlockSize.back() > MAX_TILES_ALLOWED_FOR_DIRECTORY_LISTING) ||
         (m_osDimSeparator != "/" &&
@@ -454,11 +430,18 @@ bool ZarrV3Array::LoadTileData(const uint64_t *tileIndices, bool bUseMutex,
     }
     if (fp == nullptr)
     {
-        // Missing files are OK and indicate nodata_value
-        CPLDebugOnly(ZARR_DEBUG_KEY, "Tile %s missing (=nodata)",
-                     osFilename.c_str());
-        bMissingTileOut = true;
-        return true;
+        if (nErrorBefore != CPLGetErrorCounter())
+        {
+            return false;
+        }
+        else
+        {
+            // Missing files are OK and indicate nodata_value
+            CPLDebugOnly(ZARR_DEBUG_KEY, "Tile %s missing (=nodata)",
+                         osFilename.c_str());
+            bMissingTileOut = true;
+            return true;
+        }
     }
 
     bMissingTileOut = false;
@@ -602,6 +585,7 @@ bool ZarrV3Array::IAdviseRead(const GUInt64 *arrayStartIdx, const size_t *count,
         size_t nFirstIdx = 0;
         size_t nLastIdxNotIncluded = 0;
     };
+
     std::vector<JobStruct> asJobStructs;
 
     bool bGlobalStatus = true;
@@ -739,7 +723,7 @@ bool ZarrV3Array::FlushDirtyTile() const
 
     const size_t nSourceSize =
         m_aoDtypeElts.back().nativeOffset + m_aoDtypeElts.back().nativeSize;
-    auto &abyTile =
+    const auto &abyTile =
         m_abyDecodedTileData.empty() ? m_abyRawTileData : m_abyDecodedTileData;
 
     if (IsEmptyTile(abyTile))
@@ -782,7 +766,7 @@ bool ZarrV3Array::FlushDirtyTile() const
 
     if (m_osDimSeparator == "/")
     {
-        std::string osDir = CPLGetDirname(osFilename.c_str());
+        std::string osDir = CPLGetDirnameSafe(osFilename.c_str());
         VSIStatBufL sStat;
         if (VSIStatL(osDir.c_str(), &sStat) != 0)
         {
@@ -829,12 +813,13 @@ std::string ZarrV3Array::BuildTileFilename(const uint64_t *tileIndices) const
 {
     if (m_aoDims.empty())
     {
-        return CPLFormFilename(CPLGetDirname(m_osFilename.c_str()),
-                               m_bV2ChunkKeyEncoding ? "0" : "c", nullptr);
+        return CPLFormFilenameSafe(
+            CPLGetDirnameSafe(m_osFilename.c_str()).c_str(),
+            m_bV2ChunkKeyEncoding ? "0" : "c", nullptr);
     }
     else
     {
-        std::string osFilename(CPLGetDirname(m_osFilename.c_str()));
+        std::string osFilename(CPLGetDirnameSafe(m_osFilename.c_str()));
         osFilename += '/';
         if (!m_bV2ChunkKeyEncoding)
         {
@@ -856,7 +841,7 @@ std::string ZarrV3Array::BuildTileFilename(const uint64_t *tileIndices) const
 
 std::string ZarrV3Array::GetDataDirectory() const
 {
-    return std::string(CPLGetDirname(m_osFilename.c_str()));
+    return std::string(CPLGetDirnameSafe(m_osFilename.c_str()));
 }
 
 /************************************************************************/
@@ -886,11 +871,11 @@ ZarrV3Array::GetTileIndicesFromFilename(const char *pszFilename) const
 }
 
 /************************************************************************/
-/*                             ParseDtype()                             */
+/*                           ParseDtypeV3()                             */
 /************************************************************************/
 
-static GDALExtendedDataType ParseDtype(const CPLJSONObject &obj,
-                                       std::vector<DtypeElt> &elts)
+static GDALExtendedDataType ParseDtypeV3(const CPLJSONObject &obj,
+                                         std::vector<DtypeElt> &elts)
 {
     do
     {
@@ -947,10 +932,13 @@ static GDALExtendedDataType ParseDtype(const CPLJSONObject &obj,
             }
             else if (str == "float16")
             {
+                // elt.nativeType = DtypeElt::NativeType::IEEEFP;
+                // elt.nativeSize = 2;
+                // elt.gdalTypeIsApproxOfNative = true;
+                // eDT = GDT_Float32;
                 elt.nativeType = DtypeElt::NativeType::IEEEFP;
                 elt.nativeSize = 2;
-                elt.gdalTypeIsApproxOfNative = true;
-                eDT = GDT_Float32;
+                eDT = GDT_Float16;
             }
             else if (str == "float32")
             {
@@ -1071,45 +1059,14 @@ static T ParseNoDataComponent(const CPLJSONObject &oObj, bool &bOK)
 std::shared_ptr<ZarrArray>
 ZarrV3Group::LoadArray(const std::string &osArrayName,
                        const std::string &osZarrayFilename,
-                       const CPLJSONObject &oRoot,
-                       std::set<std::string> &oSetFilenamesInLoading) const
+                       const CPLJSONObject &oRoot) const
 {
-    // Prevent too deep or recursive array loading
-    if (oSetFilenamesInLoading.find(osZarrayFilename) !=
-        oSetFilenamesInLoading.end())
-    {
-        CPLError(CE_Failure, CPLE_AppDefined,
-                 "Attempt at recursively loading %s", osZarrayFilename.c_str());
-        return nullptr;
-    }
-    if (oSetFilenamesInLoading.size() == 32)
-    {
-        CPLError(CE_Failure, CPLE_AppDefined,
-                 "Too deep call stack in LoadArray()");
-        return nullptr;
-    }
-
-    struct SetFilenameAdder
-    {
-        std::set<std::string> &m_oSetFilenames;
-        std::string m_osFilename;
-
-        SetFilenameAdder(std::set<std::string> &oSetFilenamesIn,
-                         const std::string &osFilename)
-            : m_oSetFilenames(oSetFilenamesIn), m_osFilename(osFilename)
-        {
-            m_oSetFilenames.insert(osFilename);
-        }
-
-        ~SetFilenameAdder()
-        {
-            m_oSetFilenames.erase(m_osFilename);
-        }
-    };
-
-    // Add osZarrayFilename to oSetFilenamesInLoading during the scope
+    // Add osZarrayFilename to m_poSharedResource during the scope
     // of this function call.
-    SetFilenameAdder filenameAdder(oSetFilenamesInLoading, osZarrayFilename);
+    ZarrSharedResource::SetFilenameAdder filenameAdder(m_poSharedResource,
+                                                       osZarrayFilename);
+    if (!filenameAdder.ok())
+        return nullptr;
 
     // Warn about unknown members (the spec suggests to error out, but let be
     // a bit more lenient)
@@ -1252,10 +1209,9 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
     // Deal with dimension_names
     const auto dimensionNames = oRoot["dimension_names"];
 
-    const auto FindDimension =
-        [this, &aoDims, &osArrayName, &oAttributes,
-         &oSetFilenamesInLoading](const std::string &osDimName,
-                                  std::shared_ptr<GDALDimension> &poDim, int i)
+    const auto FindDimension = [this, &aoDims, &osArrayName, &oAttributes](
+                                   const std::string &osDimName,
+                                   std::shared_ptr<GDALDimension> &poDim, int i)
     {
         auto oIter = m_oMapDimensions.find(osDimName);
         if (oIter != m_oMapDimensions.end())
@@ -1285,29 +1241,30 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
             std::string osDirName = m_osDirectoryName;
             while (true)
             {
-                const std::string osArrayFilenameDim =
-                    CPLFormFilename(CPLFormFilename(osDirName.c_str(),
-                                                    osDimName.c_str(), nullptr),
-                                    "zarr.json", nullptr);
+                const std::string osArrayFilenameDim = CPLFormFilenameSafe(
+                    CPLFormFilenameSafe(osDirName.c_str(), osDimName.c_str(),
+                                        nullptr)
+                        .c_str(),
+                    "zarr.json", nullptr);
                 VSIStatBufL sStat;
                 if (VSIStatL(osArrayFilenameDim.c_str(), &sStat) == 0)
                 {
                     CPLJSONDocument oDoc;
                     if (oDoc.Load(osArrayFilenameDim))
                     {
-                        LoadArray(osDimName, osArrayFilenameDim, oDoc.GetRoot(),
-                                  oSetFilenamesInLoading);
+                        LoadArray(osDimName, osArrayFilenameDim,
+                                  oDoc.GetRoot());
                     }
                 }
                 else
                 {
                     // Recurse to upper level for datasets such as
                     // /vsis3/hrrrzarr/sfc/20210809/20210809_00z_anl.zarr/0.1_sigma_level/HAIL_max_fcst/0.1_sigma_level/HAIL_max_fcst
-                    const std::string osDirNameNew =
-                        CPLGetPath(osDirName.c_str());
+                    std::string osDirNameNew =
+                        CPLGetPathSafe(osDirName.c_str());
                     if (!osDirNameNew.empty() && osDirNameNew != osDirName)
                     {
-                        osDirName = osDirNameNew;
+                        osDirName = std::move(osDirNameNew);
                         continue;
                     }
                 }
@@ -1380,7 +1337,7 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
     if (oDtype["fallback"].IsValid())
         oDtype = oDtype["fallback"];
     std::vector<DtypeElt> aoDtypeElts;
-    const auto oType = ParseDtype(oDtype, aoDtypeElts);
+    const auto oType = ParseDtypeV3(oDtype, aoDtypeElts);
     if (oType.GetClass() == GEDTC_NUMERIC &&
         oType.GetNumericDataType() == GDT_Unknown)
         return nullptr;
@@ -1475,6 +1432,13 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
             {
                 CPLError(CE_Failure, CPLE_AppDefined, "Invalid fill_value");
                 return nullptr;
+            }
+            else if (oType.GetNumericDataType() == GDT_Float16)
+            {
+                const GFloat16 hfNoDataValue =
+                    static_cast<GFloat16>(dfNoDataValue);
+                abyNoData.resize(sizeof(hfNoDataValue));
+                memcpy(&abyNoData[0], &hfNoDataValue, sizeof(hfNoDataValue));
             }
             else if (oType.GetNumericDataType() == GDT_Float32)
             {
@@ -1596,7 +1560,7 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
             oInputArrayMetadata.anBlockSizes.push_back(
                 static_cast<size_t>(nSize));
         oInputArrayMetadata.oElt = aoDtypeElts.back();
-        poCodecs = cpl::make_unique<ZarrV3CodecSequence>(oInputArrayMetadata);
+        poCodecs = std::make_unique<ZarrV3CodecSequence>(oInputArrayMetadata);
         if (!poCodecs->InitFromJson(oCodecs))
             return nullptr;
     }
@@ -1614,11 +1578,17 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
     {
         poArray->RegisterNoDataValue(abyNoData.data());
     }
-    poArray->ParseSpecialAttributes(oAttributes);
+    poArray->ParseSpecialAttributes(m_pSelf.lock(), oAttributes);
     poArray->SetAttributes(oAttributes);
     poArray->SetDtype(oDtype);
+    if (oCodecs.Size() > 0 &&
+        oCodecs[oCodecs.Size() - 1].GetString("name") != "bytes")
+    {
+        poArray->SetStructuralInfo(
+            "COMPRESSOR", oCodecs[oCodecs.Size() - 1].ToString().c_str());
+    }
     if (poCodecs)
-        poArray->SetCodecs(std::move(poCodecs));
+        poArray->SetCodecs(oCodecs, std::move(poCodecs));
     RegisterArray(poArray);
 
     // If this is an indexing variable, attach it to the dimension.
@@ -1638,4 +1608,75 @@ ZarrV3Group::LoadArray(const std::string &osArrayName,
     }
 
     return poArray;
+}
+
+/************************************************************************/
+/*                   ZarrV3Array::GetRawBlockInfoInfo()                 */
+/************************************************************************/
+
+CPLStringList ZarrV3Array::GetRawBlockInfoInfo() const
+{
+    CPLStringList aosInfo(m_aosStructuralInfo);
+    if (m_oType.GetSize() > 1)
+    {
+        // By default, assume that the ENDIANNESS is the native one.
+        // Otherwise there will be a ZarrV3CodecBytes instance.
+#if CPL_IS_LSB
+        aosInfo.SetNameValue("ENDIANNESS", "LITTLE");
+#else
+        aosInfo.SetNameValue("ENDIANNESS", "BIG");
+#endif
+    }
+
+    if (m_poCodecs)
+    {
+        bool bHasOtherCodec = false;
+        for (const auto &poCodec : m_poCodecs->GetCodecs())
+        {
+            if (poCodec->GetName() == ZarrV3CodecBytes::NAME &&
+                m_oType.GetSize() > 1)
+            {
+                auto poBytesCodec =
+                    dynamic_cast<const ZarrV3CodecBytes *>(poCodec.get());
+                if (poBytesCodec)
+                {
+                    if (poBytesCodec->IsLittle())
+                        aosInfo.SetNameValue("ENDIANNESS", "LITTLE");
+                    else
+                        aosInfo.SetNameValue("ENDIANNESS", "BIG");
+                }
+            }
+            else if (poCodec->GetName() == ZarrV3CodecTranspose::NAME &&
+                     m_aoDims.size() > 1)
+            {
+                auto poTransposeCodec =
+                    dynamic_cast<const ZarrV3CodecTranspose *>(poCodec.get());
+                if (poTransposeCodec && !poTransposeCodec->IsNoOp())
+                {
+                    const auto &anOrder = poTransposeCodec->GetOrder();
+                    const int nDims = static_cast<int>(anOrder.size());
+                    std::string osOrder("[");
+                    for (int i = 0; i < nDims; ++i)
+                    {
+                        if (i > 0)
+                            osOrder += ',';
+                        osOrder += std::to_string(anOrder[i]);
+                    }
+                    osOrder += ']';
+                    aosInfo.SetNameValue("TRANSPOSE_ORDER", osOrder.c_str());
+                }
+            }
+            else if (poCodec->GetName() != ZarrV3CodecGZip::NAME &&
+                     poCodec->GetName() != ZarrV3CodecBlosc::NAME &&
+                     poCodec->GetName() != ZarrV3CodecZstd::NAME)
+            {
+                bHasOtherCodec = true;
+            }
+        }
+        if (bHasOtherCodec)
+        {
+            aosInfo.SetNameValue("CODECS", m_oJSONCodecs.ToString().c_str());
+        }
+    }
+    return aosInfo;
 }

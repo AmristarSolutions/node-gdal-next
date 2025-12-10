@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2022, Planet Labs
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef OGR_ARROW_H
@@ -31,23 +15,78 @@
 
 #include "gdal_pam.h"
 #include "ogrsf_frmts.h"
+#include "ogrlayerarrow.h"
 
 #include <map>
 #include <set>
 
 #include "ogr_include_arrow.h"
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wweak-vtables"
+#endif
+
 enum class OGRArrowGeomEncoding
 {
     WKB,
     WKT,
-    GEOARROW_GENERIC,  // only used by OGRArrowWriterLayer::m_eGeomEncoding
-    GEOARROW_POINT,
-    GEOARROW_LINESTRING,
-    GEOARROW_POLYGON,
-    GEOARROW_MULTIPOINT,
-    GEOARROW_MULTILINESTRING,
-    GEOARROW_MULTIPOLYGON,
+
+    // F(ixed) S(ize) L(ist) of (x,y[,z][,m]) values / Interleaved layout
+    GEOARROW_FSL_GENERIC,  // only used by OGRArrowWriterLayer::m_eGeomEncoding
+    GEOARROW_FSL_POINT,
+    GEOARROW_FSL_LINESTRING,
+    GEOARROW_FSL_POLYGON,
+    GEOARROW_FSL_MULTIPOINT,
+    GEOARROW_FSL_MULTILINESTRING,
+    GEOARROW_FSL_MULTIPOLYGON,
+
+    // Struct of (x,y,[,z][,m])
+    GEOARROW_STRUCT_GENERIC,  // only used by OGRArrowWriterLayer::m_eGeomEncoding
+    GEOARROW_STRUCT_POINT,
+    GEOARROW_STRUCT_LINESTRING,
+    GEOARROW_STRUCT_POLYGON,
+    GEOARROW_STRUCT_MULTIPOINT,
+    GEOARROW_STRUCT_MULTILINESTRING,
+    GEOARROW_STRUCT_MULTIPOLYGON,
+};
+
+/************************************************************************/
+/*                        OGRArrowIsGeoArrowStruct()                    */
+/************************************************************************/
+
+inline bool OGRArrowIsGeoArrowStruct(OGRArrowGeomEncoding eEncoding)
+{
+    switch (eEncoding)
+    {
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_GENERIC:
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_POINT:
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_LINESTRING:
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_POLYGON:
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_MULTIPOINT:
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_MULTILINESTRING:
+        case OGRArrowGeomEncoding::GEOARROW_STRUCT_MULTIPOLYGON:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+/************************************************************************/
+/*                             IOGRArrowLayer                           */
+/************************************************************************/
+
+class OGRArrowLayer;
+
+class IOGRArrowLayer CPL_NON_FINAL
+{
+  public:
+    IOGRArrowLayer() = default;
+    virtual ~IOGRArrowLayer();
+
+    virtual OGRLayer *GetLayer() = 0;
+    virtual OGRArrowLayer *GetUnderlyingArrowLayer() = 0;
 };
 
 /************************************************************************/
@@ -58,7 +97,8 @@ class OGRArrowDataset;
 
 class OGRArrowLayer CPL_NON_FINAL
     : public OGRLayer,
-      public OGRGetNextFeatureThroughRaw<OGRArrowLayer>
+      public OGRGetNextFeatureThroughRaw<OGRArrowLayer>,
+      public IOGRArrowLayer
 {
   public:
     struct Constraint
@@ -110,19 +150,45 @@ class OGRArrowLayer CPL_NON_FINAL
     std::vector<int> m_anMapGeomFieldIndexToArrowColumn{};
     std::vector<OGRArrowGeomEncoding> m_aeGeomEncoding{};
 
-    // OGR field indexes for bbox.minx/miny/maxx/maxy Real fields
-    int m_iBBOXMinXField = -1;
-    int m_iBBOXMinYField = -1;
-    int m_iBBOXMaxXField = -1;
-    int m_iBBOXMaxYField = -1;
+    //! Whether bounding box based spatial filter should be skipped.
+    // This is set to true by OGRParquetDatasetLayer when there is a bounding
+    // box field, as an optimization.
+    bool m_bBaseArrowIgnoreSpatialFilterRect = false;
+
+    //! Whether spatial filter should be skipped (by GetNextArrowArray())
+    // This is set to true by OGRParquetDatasetLayer when filtering points in
+    // a rectangle.
+    bool m_bBaseArrowIgnoreSpatialFilter = false;
+
+    //! Describe the bbox column of a geometry column
+    struct GeomColBBOX
+    {
+        bool bIsFloat = false;
+        int iArrowCol = -1;
+        int iArrayIdx = -1;  // only valid when m_bIgnoredFields == true
+        int iArrowSubfieldXMin = -1;
+        int iArrowSubfieldYMin = -1;
+        int iArrowSubfieldXMax = -1;
+        int iArrowSubfieldYMax = -1;
+    };
+
+    //! Map from OGR geometry field index to GeomColBBOX
+    std::map<int, GeomColBBOX> m_oMapGeomFieldIndexToGeomColBBOX{};
 
     const arrow::BinaryArray *m_poArrayWKB = nullptr;
     const arrow::LargeBinaryArray *m_poArrayWKBLarge = nullptr;
     const arrow::Array *m_poArrayBBOX = nullptr;
-    const arrow::DoubleArray *m_poArrayMinX = nullptr;
-    const arrow::DoubleArray *m_poArrayMinY = nullptr;
-    const arrow::DoubleArray *m_poArrayMaxX = nullptr;
-    const arrow::DoubleArray *m_poArrayMaxY = nullptr;
+    const arrow::DoubleArray *m_poArrayXMinDouble = nullptr;
+    const arrow::DoubleArray *m_poArrayYMinDouble = nullptr;
+    const arrow::DoubleArray *m_poArrayXMaxDouble = nullptr;
+    const arrow::DoubleArray *m_poArrayYMaxDouble = nullptr;
+    const arrow::FloatArray *m_poArrayXMinFloat = nullptr;
+    const arrow::FloatArray *m_poArrayYMinFloat = nullptr;
+    const arrow::FloatArray *m_poArrayXMaxFloat = nullptr;
+    const arrow::FloatArray *m_poArrayYMaxFloat = nullptr;
+
+    //! References values in range [0, m_poSchema->field_count()-1]
+    std::set<int> m_oSetBBoxArrowColumns{};
 
     bool m_bIgnoredFields = false;
     std::vector<int>
@@ -132,11 +198,16 @@ class OGRArrowLayer CPL_NON_FINAL
         // m_bIgnoredFields is set
     int m_nRequestedFIDColumn = -1;  // only valid when m_bIgnoredFields is set
 
+    int m_nExpectedBatchColumns =
+        -1;  // Should be equal to m_poBatch->num_columns() (when
+             // m_bIgnoredFields is set)
+
     bool m_bEOF = false;
     int64_t m_nFeatureIdx = 0;
     int64_t m_nIdxInBatch = 0;
     std::map<std::string, CPLJSONObject> m_oMapGeometryColumns{};
     mutable std::map<int, OGREnvelope> m_oMapExtents{};
+    mutable std::map<int, OGREnvelope3D> m_oMapExtents3D{};
     int m_iRecordBatch = -1;
     std::shared_ptr<arrow::RecordBatch> m_poBatch{};
     // m_poBatch->columns() is a relatively costly operation, so cache its
@@ -147,8 +218,15 @@ class OGRArrowLayer CPL_NON_FINAL
 
     std::vector<Constraint> m_asAttributeFilterConstraints{};
 
+    //! Whether attribute filter should be skipped.
+    // This is set to true by OGRParquetDatasetLayer when it can fully translate
+    // a filter, as an optimization.
+    bool m_bBaseArrowIgnoreAttributeFilter = false;
+
     std::map<std::string, std::unique_ptr<OGRFieldDefn>>
-    LoadGDALMetadata(const arrow::KeyValueMetadata *kv_metadata);
+    LoadGDALSchema(const arrow::KeyValueMetadata *kv_metadata);
+
+    void LoadGDALMetadata(const arrow::KeyValueMetadata *kv_metadata);
 
     OGRArrowLayer(OGRArrowDataset *poDS, const char *pszLayerName);
 
@@ -163,6 +241,7 @@ class OGRArrowLayer CPL_NON_FINAL
     static bool
     IsValidGeometryEncoding(const std::shared_ptr<arrow::Field> &field,
                             const std::string &osEncoding,
+                            bool bWarnIfUnknownEncoding,
                             OGRwkbGeometryType &eGeomTypeOut,
                             OGRArrowGeomEncoding &eGeomEncodingOut);
     static OGRwkbGeometryType
@@ -207,9 +286,14 @@ class OGRArrowLayer CPL_NON_FINAL
     // Refreshes Constraint.iArrayIdx from iField. To be called by SetIgnoredFields()
     void ComputeConstraintsArrayIdx();
 
+    static const swq_expr_node *GetColumnSubNode(const swq_expr_node *poNode);
+    static const swq_expr_node *GetConstantSubNode(const swq_expr_node *poNode);
+    static bool IsComparisonOp(int op);
+
     virtual bool FastGetExtent(int iGeomField, OGREnvelope *psExtent) const;
+    bool FastGetExtent3D(int iGeomField, OGREnvelope3D *psExtent) const;
     static OGRErr GetExtentFromMetadata(const CPLJSONObject &oJSONDef,
-                                        OGREnvelope *psExtent);
+                                        OGREnvelope3D *psExtent);
 
     int GetArrowSchema(struct ArrowArrayStream *,
                        struct ArrowSchema *out) override;
@@ -221,31 +305,43 @@ class OGRArrowLayer CPL_NON_FINAL
         ++m_nFeatureIdx;
     }
 
-  public:
-    virtual ~OGRArrowLayer() override;
+    void SanityCheckOfSetBatch() const;
 
-    OGRFeatureDefn *GetLayerDefn() override
+    OGRLayer *GetLayer() override
+    {
+        return this;
+    }
+
+    OGRArrowLayer *GetUnderlyingArrowLayer() override
+    {
+        return this;
+    }
+
+  public:
+    ~OGRArrowLayer() override;
+
+    const OGRFeatureDefn *GetLayerDefn() const override
     {
         return m_poFeatureDefn;
     }
+
     void ResetReading() override;
-    const char *GetFIDColumn() override
+
+    const char *GetFIDColumn() const override
     {
         return m_osFIDColumn.c_str();
     }
     DEFINE_GET_NEXT_FEATURE_THROUGH_RAW(OGRArrowLayer)
-    OGRErr GetExtent(OGREnvelope *psExtent, int bForce = TRUE) override;
-    OGRErr GetExtent(int iGeomField, OGREnvelope *psExtent,
-                     int bForce = TRUE) override;
+    OGRErr IGetExtent(int iGeomField, OGREnvelope *psExtent,
+                      bool bForce) override;
+    OGRErr IGetExtent3D(int iGeomField, OGREnvelope3D *psExtent,
+                        bool bForce) override;
     OGRErr SetAttributeFilter(const char *pszFilter) override;
 
-    void SetSpatialFilter(OGRGeometry *poGeom) override
-    {
-        SetSpatialFilter(0, poGeom);
-    }
-    void SetSpatialFilter(int iGeomField, OGRGeometry *poGeom) override;
+    OGRErr ISetSpatialFilter(int iGeomField,
+                             const OGRGeometry *poGeom) override;
 
-    int TestCapability(const char *pszCap) override;
+    int TestCapability(const char *pszCap) const override;
 
     bool GetArrowStream(struct ArrowArrayStream *out_stream,
                         CSLConstList papszOptions = nullptr) override;
@@ -265,7 +361,7 @@ class OGRArrowLayer CPL_NON_FINAL
 class OGRArrowDataset CPL_NON_FINAL : public GDALPamDataset
 {
     std::shared_ptr<arrow::MemoryPool> m_poMemoryPool{};
-    std::unique_ptr<OGRArrowLayer> m_poLayer{};
+    std::unique_ptr<IOGRArrowLayer> m_poLayer{};
     std::vector<std::string> m_aosDomainNames{};
     std::map<std::string, int> m_oMapDomainNameToCol{};
 
@@ -273,15 +369,29 @@ class OGRArrowDataset CPL_NON_FINAL : public GDALPamDataset
     explicit OGRArrowDataset(
         const std::shared_ptr<arrow::MemoryPool> &poMemoryPool);
 
+    ~OGRArrowDataset() override
+    {
+        OGRArrowDataset::Close();
+    }
+
+    CPLErr Close() override
+    {
+        m_poLayer.reset();
+        m_poMemoryPool.reset();
+        return GDALPamDataset::Close();
+    }
+
     inline arrow::MemoryPool *GetMemoryPool() const
     {
         return m_poMemoryPool.get();
     }
+
     inline const std::shared_ptr<arrow::MemoryPool> &GetSharedMemoryPool() const
     {
         return m_poMemoryPool;
     }
-    void SetLayer(std::unique_ptr<OGRArrowLayer> &&poLayer);
+
+    void SetLayer(std::unique_ptr<IOGRArrowLayer> &&poLayer);
 
     void RegisterDomainName(const std::string &osDomainName, int iFieldIndex);
 
@@ -290,8 +400,9 @@ class OGRArrowDataset CPL_NON_FINAL : public GDALPamDataset
     const OGRFieldDomain *
     GetFieldDomain(const std::string &name) const override;
 
-    int GetLayerCount() override;
-    OGRLayer *GetLayer(int idx) override;
+    int GetLayerCount() const override;
+    using GDALDataset::GetLayer;
+    const OGRLayer *GetLayer(int idx) const override;
 };
 
 /************************************************************************/
@@ -319,6 +430,29 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
     std::vector<OGRArrowGeomEncoding> m_aeGeomEncoding{};
     int m_nWKTCoordinatePrecision = -1;
 
+    //! Base struct data type for GeoArrow struct geometry columns.
+    // Constraint: if not empty, m_apoBaseStructGeomType.size() == m_poFeatureDefn->GetGeomFieldCount()
+    std::vector<std::shared_ptr<arrow::DataType>> m_apoBaseStructGeomType{};
+
+    //! Whether to use a struct field with the values of the bounding box
+    // of the geometries. Used by Parquet.
+    bool m_bWriteBBoxStruct = false;
+
+    //! Schema fields for bounding box of geometry columns.
+    // Constraint: if not empty, m_apoFieldsBBOX.size() == m_poFeatureDefn->GetGeomFieldCount()
+    std::vector<std::shared_ptr<arrow::Field>> m_apoFieldsBBOX{};
+
+    //! Array builers for bounding box of geometry columns.
+    // m_apoBuildersBBOXStruct is for the top-level field of type struct.
+    // m_apoBuildersBBOX{XMin|YMin|XMax|YMax} are for the floating-point values
+    // Constraint: if not empty, m_apoBuildersBBOX{Struct|XMin|YMin|XMax|YMax}.size() == m_poFeatureDefn->GetGeomFieldCount()
+    std::vector<std::shared_ptr<arrow::StructBuilder>>
+        m_apoBuildersBBOXStruct{};
+    std::vector<std::shared_ptr<arrow::FloatBuilder>> m_apoBuildersBBOXXMin{};
+    std::vector<std::shared_ptr<arrow::FloatBuilder>> m_apoBuildersBBOXYMin{};
+    std::vector<std::shared_ptr<arrow::FloatBuilder>> m_apoBuildersBBOXXMax{};
+    std::vector<std::shared_ptr<arrow::FloatBuilder>> m_apoBuildersBBOXYMax{};
+
     std::string m_osFIDColumn{};
     int64_t m_nFeatureCount = 0;
 
@@ -335,8 +469,14 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
     std::vector<std::set<OGRwkbGeometryType>>
         m_oSetWrittenGeometryTypes{};  // size: GetGeomFieldCount()
 
+    bool m_bEdgesSpherical = false;
+#if ARROW_VERSION_MAJOR >= 21
+    bool m_bUseArrowWKBExtension = false;
+#endif
+
     static OGRArrowGeomEncoding
-    GetPreciseArrowGeomEncoding(OGRwkbGeometryType eGType);
+    GetPreciseArrowGeomEncoding(OGRArrowGeomEncoding eEncodingType,
+                                OGRwkbGeometryType eGType);
     static const char *
     GetGeomEncodingAsString(OGRArrowGeomEncoding eGeomEncoding,
                             bool bForParquetGeo);
@@ -347,18 +487,23 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
 
     virtual bool IsFileWriterCreated() const = 0;
     virtual void CreateWriter() = 0;
-    virtual void CloseFileWriter() = 0;
+    virtual bool CloseFileWriter() = 0;
 
     void CreateSchemaCommon();
     void FinalizeSchema();
     virtual void CreateSchema() = 0;
+
     virtual void PerformStepsBeforeFinalFlushGroup()
     {
     }
 
     void CreateArrayBuilders();
+
+    //! Clear array builders
+    void ClearArrayBuilers();
+
     virtual bool FlushGroup() = 0;
-    void FinalizeWriting();
+    bool FinalizeWriting();
     bool WriteArrays(std::function<bool(const std::shared_ptr<arrow::Field> &,
                                         const std::shared_ptr<arrow::Array> &)>
                          postProcessArray);
@@ -367,9 +512,11 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
                                                size_t /*nLen*/)
     {
     }
+
     virtual void FixupGeometryBeforeWriting(OGRGeometry * /* poGeom */)
     {
     }
+
     virtual bool IsSRSRequired() const = 0;
     bool WriteArrowBatchInternal(
         const struct ArrowSchema *schema, struct ArrowArray *array,
@@ -393,24 +540,31 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
     std::vector<std::string> GetFieldDomainNames() const;
     const OGRFieldDomain *GetFieldDomain(const std::string &name) const;
 
-    const char *GetFIDColumn() override
+    const char *GetFIDColumn() const override
     {
         return m_osFIDColumn.c_str();
     }
-    OGRFeatureDefn *GetLayerDefn() override
+
+    using OGRLayer::GetLayerDefn;
+
+    const OGRFeatureDefn *GetLayerDefn() const override
     {
         return m_poFeatureDefn;
     }
+
     void ResetReading() override
     {
     }
+
     OGRFeature *GetNextFeature() override
     {
         return nullptr;
     }
-    int TestCapability(const char *pszCap) override;
-    OGRErr CreateField(OGRFieldDefn *poField, int bApproxOK = TRUE) override;
-    OGRErr CreateGeomField(OGRGeomFieldDefn *poField,
+
+    int TestCapability(const char *pszCap) const override;
+    OGRErr CreateField(const OGRFieldDefn *poField,
+                       int bApproxOK = TRUE) override;
+    OGRErr CreateGeomField(const OGRGeomFieldDefn *poField,
                            int bApproxOK = TRUE) override;
     GIntBig GetFeatureCount(int bForce) override;
 
@@ -420,6 +574,7 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
     {
         return true;
     }
+
     bool
     CreateFieldFromArrowSchema(const struct ArrowSchema *schema,
                                CSLConstList papszOptions = nullptr) override;
@@ -429,6 +584,92 @@ class OGRArrowWriterLayer CPL_NON_FINAL : public OGRLayer
 
   protected:
     OGRErr ICreateFeature(OGRFeature *poFeature) override;
+
+    bool FlushFeatures();
+
+    static void RemoveIDFromMemberOfEnsembles(CPLJSONObject &obj);
+    static OGRSpatialReference IdentifyCRS(const OGRSpatialReference *poSRS);
 };
+
+/************************************************************************/
+/*                     OGRGeoArrowWkbExtensionType                      */
+/************************************************************************/
+
+#if ARROW_VERSION_MAJOR >= 21
+
+class OGRGeoArrowWkbExtensionType final : public arrow::ExtensionType
+{
+  public:
+    explicit OGRGeoArrowWkbExtensionType(
+        const std::shared_ptr<arrow::DataType> &storage_type,
+        const std::string &metadata)
+        : arrow::ExtensionType(storage_type), metadata_(metadata)
+    {
+    }
+
+    std::string extension_name() const override
+    {
+        return EXTENSION_NAME_GEOARROW_WKB;
+    }
+
+    bool ExtensionEquals(const arrow::ExtensionType &other) const override
+    {
+        return extension_name() == other.extension_name() &&
+               storage_type_->Equals(other.storage_type()) &&
+               Serialize() == other.Serialize();
+    }
+
+    arrow::Result<std::shared_ptr<arrow::DataType>>
+    Deserialize(std::shared_ptr<arrow::DataType> storage_type,
+                const std::string &serialized) const override
+    {
+        return Make(std::move(storage_type), serialized);
+    }
+
+    std::string Serialize() const override
+    {
+        return metadata_;
+    }
+
+    std::shared_ptr<arrow::Array>
+    MakeArray(std::shared_ptr<arrow::ArrayData> data) const override
+    {
+        CPLAssert(data->type->id() == arrow::Type::EXTENSION);
+        CPLAssert(EXTENSION_NAME_GEOARROW_WKB ==
+                  static_cast<const arrow::ExtensionType &>(*data->type)
+                      .extension_name());
+        return std::make_shared<arrow::ExtensionArray>(data);
+    }
+
+    static bool IsSupportedStorageType(arrow::Type::type typeId)
+    {
+        // TODO: also add BINARY_VIEW if we support it some day.
+        return typeId == arrow::Type::BINARY ||
+               typeId == arrow::Type::LARGE_BINARY;
+    }
+
+    static arrow::Result<std::shared_ptr<arrow::DataType>>
+    Make(std::shared_ptr<arrow::DataType> storage_type,
+         const std::string &metadata)
+    {
+        if (!IsSupportedStorageType(storage_type->id()))
+        {
+            return arrow::Status::Invalid(
+                "Invalid storage type for OGRGeoArrowWkbExtensionType: ",
+                storage_type->ToString());
+        }
+        return std::make_shared<OGRGeoArrowWkbExtensionType>(
+            std::move(storage_type), metadata);
+    }
+
+  private:
+    std::string metadata_{};
+};
+
+#endif  // ARROW_VERSION_MAJOR >= 21
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #endif  // OGR_ARROW_H

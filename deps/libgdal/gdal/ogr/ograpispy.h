@@ -1,5 +1,4 @@
 /******************************************************************************
- * $Id$
  *
  * Project:  OpenGIS Simple Features Reference Implementation
  * Purpose:  OGR C API "Spy"
@@ -8,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2014, Even Rouault <even.rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef OGRAPISPY_H_INCLUDED
@@ -55,13 +38,12 @@
  * reproducible way. The path for snapshots is the current working directory by
  * default, and can be changed by setting the OGR_API_SPY_SNAPSHOT_PATH
  * configuration option. If it is set to NO, the snapshot feature will be
- * disabled. The reliability of snapshoting relies on if the dataset correctly
+ * disabled. The reliability of snapshotting relies on if the dataset correctly
  * implements GetFileList() (for multi-file datasources)
  *
- * @since GDAL 2.0
  */
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(GDAL_DEBUG)
 #define OGRAPISPY_ENABLED
 #endif
 
@@ -78,9 +60,9 @@ void OGRAPISpyOpen(const char *pszName, int bUpdate, int iSnapshot,
                    GDALDatasetH *phDS);
 void OGRAPISpyPreClose(GDALDatasetH hDS);
 void OGRAPISpyPostClose();
-void OGRAPISpyCreateDataSource(OGRSFDriverH hDriver, const char *pszName,
-                               char **papszOptions, OGRDataSourceH hDS);
-void OGRAPISpyDeleteDataSource(OGRSFDriverH hDriver, const char *pszName);
+void OGRAPISpyCreateDataSource(GDALDriverH hDriver, const char *pszName,
+                               char **papszOptions, GDALDatasetH hDS);
+void OGRAPISpyDeleteDataSource(GDALDriverH hDriver, const char *pszName);
 
 void OGRAPISpy_DS_GetLayerCount(GDALDatasetH hDS);
 void OGRAPISpy_DS_GetLayer(GDALDatasetH hDS, int iLayer, OGRLayerH hLayer);
@@ -104,6 +86,7 @@ void OGRAPISpy_Dataset_RollbackTransaction(GDALDatasetH hDS);
 void OGRAPISpy_L_GetFeatureCount(OGRLayerH hLayer, int bForce);
 void OGRAPISpy_L_GetExtent(OGRLayerH hLayer, int bForce);
 void OGRAPISpy_L_GetExtentEx(OGRLayerH hLayer, int iGeomField, int bForce);
+void OGRAPISpy_L_GetExtent3D(OGRLayerH hLayer, int iGeomField, int bForce);
 void OGRAPISpy_L_SetAttributeFilter(OGRLayerH hLayer, const char *pszFilter);
 void OGRAPISpy_L_GetFeature(OGRLayerH hLayer, GIntBig nFeatureId);
 void OGRAPISpy_L_SetNextByIndex(OGRLayerH hLayer, GIntBig nIndex);

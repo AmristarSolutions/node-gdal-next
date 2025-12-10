@@ -276,7 +276,7 @@ CPLErr JPEG_Codec::CompressJPEG(buf_mgr &dst, buf_mgr &src)
     ILSize sz = img.pagesize;
 
     jpeg_destination_mgr jmgr;
-    jmgr.next_output_byte = (JOCTET *)dst.buffer;
+    jmgr.next_output_byte = reinterpret_cast<JOCTET *>(dst.buffer);
     jmgr.free_in_buffer = dst.size;
     jmgr.init_destination = init_or_terminate_destination;
     jmgr.empty_output_buffer = empty_output_buffer;
@@ -408,7 +408,7 @@ CPLErr JPEG_Codec::CompressJPEG(buf_mgr &dst, buf_mgr &src)
     if (nzeros != 0)
     {  // build the Zen chunk
         mbuffer.size = 2 * mask.size() + CHUNK_NAME_SIZE;
-        buffer = reinterpret_cast<char *>(CPLMalloc(mbuffer.size));
+        buffer = static_cast<char *>(CPLMalloc(mbuffer.size));
         if (!buffer)
         {
             jpeg_destroy_compress(&cinfo);
@@ -611,9 +611,9 @@ static boolean MaskProcessor(j_decompress_ptr pcinfo)
  * @param sz if non-zero, test that uncompressed data fits in the buffer.
  */
 #if defined(JPEG12_ON)
-CPLErr JPEG_Codec::DecompressJPEG12(buf_mgr &dst, buf_mgr &isrc)
+CPLErr JPEG_Codec::DecompressJPEG12(buf_mgr &dst, const buf_mgr &isrc)
 #else
-CPLErr JPEG_Codec::DecompressJPEG(buf_mgr &dst, buf_mgr &isrc)
+CPLErr JPEG_Codec::DecompressJPEG(buf_mgr &dst, const buf_mgr &isrc)
 #endif
 
 {
@@ -735,10 +735,10 @@ CPLErr JPEG_Codec::DecompressJPEG(buf_mgr &dst, buf_mgr &isrc)
         jpeg_destroy_decompress(&cinfo);
         return CE_Failure;
     }
-    if (linesize * cinfo.image_height != dst.size)
+    if (static_cast<size_t>(linesize) * cinfo.image_height != dst.size)
     {
         CPLError(CE_Warning, CPLE_AppDefined, "MRF: read JPEG size is wrong");
-        if (linesize * cinfo.image_height > dst.size)
+        if (static_cast<size_t>(linesize) * cinfo.image_height > dst.size)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
                      "MRF: JPEG decompress buffer overflow");
@@ -825,7 +825,7 @@ static size_t brunsli_fun_callback(void *out, const GByte *data, size_t size)
 }
 #endif
 
-// Type dependent dispachers
+// Type dependent dispatchers
 CPLErr JPEG_Band::Decompress(buf_mgr &dst, buf_mgr &src)
 {
 #if defined(JPEG12_SUPPORTED)
@@ -933,6 +933,11 @@ JPEG_Band::JPEG_Band(MRFDataset *pDS, const ILImage &image, int b, int level)
     {
         codec.optimize = true;  // Required for 12bit
     }
+    // For high Q, no downsampling and multispectral, output can be larger than the input
+    // This is just a guess, 20% larger plus some space for the headers and mask
+    // If too small, the empty_output_buffer() above will be called and an
+    // error will be generated
+    poMRFDS->SetPBufferSize(int(1.2 * image.pageSizeBytes + 4000));
 }
 #endif
 

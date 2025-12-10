@@ -1,5 +1,9 @@
 #include "typed_array.hpp"
 
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 11)
+#include <cpl_float.h>
+#endif
+
 #include <climits>
 #include <sstream>
 
@@ -23,6 +27,13 @@ Local<Value> TypedArray::New(GDALDataType type, int64_t length) {
     case GDT_UInt16: name = "Uint16Array"; break;
     case GDT_Int32: name = "Int32Array"; break;
     case GDT_UInt32: name = "Uint32Array"; break;
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 5)
+    case GDT_Int64: name = "BigInt64Array"; break;
+    case GDT_UInt64: name = "BigUint64Array"; break;
+#endif
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 11)
+    case GDT_Float16: name = "Float16Array"; break;
+#endif
     case GDT_Float32: name = "Float32Array"; break;
     case GDT_Float64: name = "Float64Array"; break;
     default: Nan::ThrowError("Unsupported array type"); return scope.Escape(Nan::Undefined());
@@ -36,7 +47,11 @@ Local<Value> TypedArray::New(GDALDataType type, int64_t length) {
   }
 
   constructor = val.As<Function>();
-  double size = length * GDALGetDataTypeSize(type) / 8;
+  int64_t size = length * GDALGetDataTypeSizeBytes(type);
+  if (size == 0) {
+    Nan::ThrowError("Invalid GDAL data type");
+    return Local<Value>();
+  }
   if (size > max_safe_integer) {
     Nan::ThrowError("Buffer size exceeds maximum safe JS integer");
     return Local<Value>();
@@ -84,17 +99,24 @@ Local<Value> TypedArray::New(GDALDataType type, void *data, int64_t length) {
     case GDT_UInt16: name = "Uint16Array"; break;
     case GDT_Int32: name = "Int32Array"; break;
     case GDT_UInt32: name = "Uint32Array"; break;
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 5)
+    case GDT_Int64: name = "BigInt64Array"; break;
+    case GDT_UInt64: name = "BigUint64Array"; break;
+#endif
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 11)
+    case GDT_Float16: name = "Float16Array"; break;
+#endif
     case GDT_Float32: name = "Float32Array"; break;
     case GDT_Float64: name = "Float64Array"; break;
     default: throw "Unsupported array type";
   }
 
   size_t size = GDALGetDataTypeSizeBytes(type);
+  if (size == 0) { throw "Invalid GDAL data type"; }
 
   // make ArrayBuffer with external storage by creating a Node.js Buffer w/ an empty free callback
-  Local<Object> buffer = Nan::NewBuffer(
-                           reinterpret_cast<char *>(data), length * size, [](char *, void *) {}, nullptr)
-                           .ToLocalChecked();
+  Local<Object> buffer =
+    Nan::NewBuffer(reinterpret_cast<char *>(data), length * size, [](char *, void *) {}, nullptr).ToLocalChecked();
 
   if (buffer.IsEmpty() || !buffer->IsObject()) { throw "Error getting creating Node.js Buffer"; }
 
@@ -169,6 +191,25 @@ void *TypedArray::Validate(Local<Object> obj, GDALDataType type, int64_t min_len
       if (ValidateLength(contents.length(), min_length)) return NULL;
       return *contents;
     }
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 5)
+    case GDT_Int64: {
+      Nan::TypedArrayContents<GInt64> contents(obj);
+      if (ValidateLength(contents.length(), min_length)) return NULL;
+      return *contents;
+    }
+    case GDT_UInt64: {
+      Nan::TypedArrayContents<GUInt64> contents(obj);
+      if (ValidateLength(contents.length(), min_length)) return NULL;
+      return *contents;
+    }
+#endif
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 11)
+    case GDT_Float16: {
+      Nan::TypedArrayContents<GFloat16> contents(obj);
+      if (ValidateLength(contents.length(), min_length)) return NULL;
+      return *contents;
+    }
+#endif
     case GDT_Float32: {
       Nan::TypedArrayContents<float> contents(obj);
       if (ValidateLength(contents.length(), min_length)) return NULL;

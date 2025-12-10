@@ -16,7 +16,9 @@ test/data/**/*.aux*
 test/data/**/*.tmp*
 test/data/**/*.gfs
 test/data/**/*.gz.*
+test/data/**/*.ovr
 node_modules
+/.idea
 /.project
 .DS_Store
 deplibs
@@ -28,11 +30,12 @@ deps/libsqlite/sqlite*.tar.gz
 deps/libcurl/cur*tar.gz
 deps/libhdf5/hdf5*.tar.gz
 deps/libnetcdf/netcdf*.tar.gz
+deps/libaec/libaec*.tar.gz
+deps/muparser/muparser*.tar.gz
 lib/binding
 lib/index.d.ts
 doc
 /coverage
-package-lock.json
 yarn.lock
 Attic
 

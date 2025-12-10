@@ -30,7 +30,7 @@ class Dataset : public Nan::ObjectWrap {
   static Nan::Persistent<FunctionTemplate> constructor;
   static void Initialize(Local<Object> target);
   static NAN_METHOD(New);
-  static Local<Value> New(GDALDataset *ds, GDALDataset *parent = nullptr);
+  static Local<Value> New(GDALDataset *ds, GDALDataset *parent = nullptr, bool close = true);
   static NAN_METHOD(toString);
   GDAL_ASYNCABLE_DECLARE(flush);
   GDAL_ASYNCABLE_DECLARE(getMetadata);
@@ -48,6 +48,7 @@ class Dataset : public Nan::ObjectWrap {
   GDAL_ASYNCABLE_GETTER_DECLARE(rasterSizeGetter);
   GDAL_ASYNCABLE_GETTER_DECLARE(srsGetter);
   static NAN_GETTER(driverGetter);
+  static NAN_GETTER(threadSafeGetter);
   GDAL_ASYNCABLE_GETTER_DECLARE(geoTransformGetter);
   static NAN_GETTER(descriptionGetter);
   static NAN_GETTER(layersGetter);

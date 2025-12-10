@@ -5,6 +5,123 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+# [3.12.0] 2025-11-09
+
+### Added
+ - GDAL 3.12.0
+ - GDAL 3.12 RasterBand algebra support
+ - Add muparser and enable muparser expression support
+ - Node 25 support
+ - Miramon read-only driver
+ - Native `Float16Array` support on Node.js 24 and later
+
+### Changed
+ - `package-lock.json` is now fixed for each version in source control as per the `npm` official guidelines
+ - The bindings code is now C++17
+
+### Changed
+ - `package-lock.json` is now fixed for each version in source control as per the `npm` official guidelines
+
+### Removed
+ - Drop Node 18 and Node 23 support *(No longer supported by Node)*
+ - Drop macOS 13 and macOS 14 support *(No longer supported by Github)*
+ - Drop Linux glibc support before Debian Bullseye / Ubuntu 22.04 *(GDAL does not build with g++8)*
+
+## [3.11.5] 2025-11-04
+
+### Added
+ - GDAL 3.11.5
+
+## [3.11.4] 2025-09-12
+
+ - Fix [mmomtchev/node-gdal-async#250](https://github.com/mmomtchev/node-gdal-async/issues/250), fix a leak of `Buffer` objects after using `vsimem.set` and `vsimem.release`
+
+### Added
+ - GDAL 3.11.4
+ - [mmomtchev/node-gdal-async#233](https://github.com/mmomtchev/node-gdal-async/issues/233): Support SQLite SQL dialect
+ - [mmomtchev/node-gdal-async#243](https://github.com/mmomtchev/node-gdal-async/pull/243), support for `Feature.{get|set}StyleString`
+
+### Changed
+ - [mmomtchev/node-gdal-async#242](https://github.com/mmomtchev/node-gdal-async/pull/242), TypeScript types correctly reflect that some functions can return `null` geometries
+
+## [3.11.3] 2025-07-13
+
+### Added
+ - GDAL 3.11.3
+
+### Changed
+ - Fix [mmomtchev/node-gdal-async#221](https://github.com/mmomtchev/node-gdal-async/issues/221):
+  * Fix RAM size memory reporting on Linux needed `GDAL_CACHEMAX` with a percentage
+  * Fail graciously if the user specifies a GDAL data type not supported by the current version
+  * Do not throw an error if GDAL returns a warning in `gdal.checksumImage`
+
+# [3.11.0] 2025-05-10
+
+### Added
+ - GDAL 3.11.0
+ - Node.js 24 binaries
+ - Add `libaec` and AEC encoding support for GRIB2 files - including those provided by Météo France
+ - Add the new `LIBERTIFF` driver
+ - Initial `Float16` support through the [`@petamoriken/float16`](https://www.npmjs.com/package/@petamoriken/float16) polyfill with GDAL >= 3.11
+ - `Int64` and `UInt64` support through `BigInt64Array` and `BigUint64Array` with GDAL >= 3.5
+ - Native `ExprTk` support with GDAL 3.11, the old JS `ExprTk` support via the `gdal-exprtk` plugin is still available but won't be maintained anymore
+
+### Changed
+ - All `read` and `write` functions now use generics in TypeScript, deduction is automatic in many cases, but if TypeScript cannot deduce the type, it should be specified manually: `const data: Uint8Array = band.pixels.read(0, 0, w, h)` should become `const data = band.pixels.read<Uint8Array>(0, 0, w, h)`, pure JavaScript is not affected
+ - Fix the `gdal.info()` example
+ - Fix [mmomtchev/node-gdal-async#204](https://github.com/mmomtchev/node-gdal-async/issues/204), define `HAVE_TIFF` for other drivers using built-in TIFF support
+ - Partial solution for [mmomtchev/node-gdal-async#217](https://github.com/mmomtchev/node-gdal-async/issues/217)
+
+### Removed
+ - `node-gdal-async` now requires ES2020 support
+ - Drop all obsolete in GDAL 3.11 drivers, including `SDTS`
+
+## [3.10.2] 2025-03-09
+
+### Added
+ - GDAL 3.10.2
+
+## [3.10.1] 2025-01-14
+
+### Added
+ - GDAL 3.10.1
+
+### Changed
+ - Fix 3.10 package installation
+
+# [3.10.0] 2025-01-13
+
+### Added
+ - GDAL 3.10.0
+ - GEOS 3.13.0
+ - PROJ 9.5.1
+ - Apple ARM support on macOS 15 and later
+ - Node.js 23 support (requires Ubuntu 20.04/later or Debian 11 Bullseye/later)
+ - Implement RFC101 support, see [`ASYNCIO.md`](https://github.com/mmomtchev/node-gdal-async/blob/main/ASYNCIO.md) for more information
+
+### Removed
+ - Drop Node.js 16 support
+ - Drop macOS 12 support
+
+## [3.9.2] 2024-08-18
+
+### Added
+ - GDAL 3.9.2
+
+## [3.9.0] 2024-06-24
+
+### Added
+ - GDAL 3.9.0
+ - Node.js 22 support
+
+### Changed
+ - All shared library symbols are now hidden on Linux, allowing to load the binary addon in a process that has loaded a different version of GDAL (on Windows this has always been possible and on maOS, while possible in theory, this particular linking mode is not supported by `node-gyp`)
+
+### Removed
+ - Drop macOS 11 support
+ - Drop Node.js 21 support
+ - Mark Node.js 16 as obsolete with a warning
+
 ## [3.8.5] 2024-04-09
 
 ### Added

@@ -2,8 +2,7 @@ import * as gdal from 'gdal-async'
 import { assert } from 'chai'
 
 describe('gdal.LineString', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should be instantiable', () => {
     new gdal.LineString()
@@ -63,8 +62,8 @@ describe('gdal.LineString', () => {
         assert.instanceOf(a, gdal.LineString)
         assert.instanceOf(b, gdal.Point)
         assert.throws(() => {
-          /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-          a.addSubLineString(b as any)
+        // @ts-expect-error voluntary error
+          a.addSubLineString(b)
         })
       })
       it('should throw if given invalid indexes', () => {

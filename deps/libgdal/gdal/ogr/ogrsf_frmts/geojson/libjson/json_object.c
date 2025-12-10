@@ -638,10 +638,15 @@ size_t json_c_object_sizeof(void)
 	return sizeof(struct json_object);
 }
 
+static void ignore_return_bool_value(json_bool b)
+{
+    (void)b;
+}
+
 struct json_object *json_object_object_get(const struct json_object *jso, const char *key)
 {
 	struct json_object *result = NULL;
-	json_object_object_get_ex(jso, key, &result);
+	ignore_return_bool_value(json_object_object_get_ex(jso, key, &result));
 	return result;
 }
 
@@ -1022,11 +1027,11 @@ static int json_object_double_to_json_string_format(struct json_object *jso, str
 	 * ECMA 262 section 9.8.1 defines
 	 * how to handle these cases as strings
 	 */
-	if (CPLIsNan(jsodbl->c_double))
+	if (isnan(jsodbl->c_double))
 	{
 		size = snprintf(buf, sizeof(buf), "NaN");
 	}
-	else if (CPLIsInf(jsodbl->c_double))
+	else if (isinf(jsodbl->c_double))
 	{
 		if (jsodbl->c_double > 0)
 			size = snprintf(buf, sizeof(buf), "Infinity");

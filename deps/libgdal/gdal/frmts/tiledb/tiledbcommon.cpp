@@ -7,28 +7,13 @@
  ******************************************************************************
  * Copyright (c) 2023, TileDB, Inc
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "tiledbheaders.h"
+#include "tiledbdrivercore.h"
 
-#include "tiledb/tiledb"
+TileDBDataset::~TileDBDataset() = default;
 
 /************************************************************************/
 /*                      VSI_to_tiledb_uri()                             */
@@ -42,6 +27,8 @@ CPLString TileDBDataset::VSI_to_tiledb_uri(const char *pszUri)
         osUri.Printf("s3://%s", pszUri + 7);
     else if (STARTS_WITH_CI(pszUri, "/VSIGS/"))
         osUri.Printf("gcs://%s", pszUri + 7);
+    else if (STARTS_WITH_CI(pszUri, "/VSIAZ/"))
+        osUri.Printf("azure://%s", pszUri + 7);
     else
     {
         osUri = pszUri;
@@ -51,12 +38,22 @@ CPLString TileDBDataset::VSI_to_tiledb_uri(const char *pszUri)
         {
             char *pszCurDir = CPLGetCurrentDir();
             if (pszCurDir)
-                osUri = CPLFormFilename(pszCurDir, pszUri, nullptr);
+                osUri = CPLFormFilenameSafe(pszCurDir, pszUri, nullptr);
             CPLFree(pszCurDir);
         }
     }
 
     return osUri;
+}
+
+/************************************************************************/
+/*                      TileDBObjectExists()                            */
+/************************************************************************/
+bool TileDBDataset::TileDBObjectExists(const std::string &osArrayUri)
+{
+    tiledb::Context ctx;
+    const auto eType = tiledb::Object::object(ctx, osArrayUri).type();
+    return eType != tiledb::Object::Type::Invalid;
 }
 
 /************************************************************************/
@@ -119,58 +116,25 @@ CPLErr TileDBDataset::AddFilter(tiledb::Context &ctx,
 int TileDBDataset::Identify(GDALOpenInfo *poOpenInfo)
 
 {
-    if (STARTS_WITH_CI(poOpenInfo->pszFilename, "TILEDB:"))
+    int nRet = TileDBDriverIdentifySimplified(poOpenInfo);
+    if (nRet == GDAL_IDENTIFY_UNKNOWN)
     {
-        return TRUE;
-    }
-
-    try
-    {
-        const char *pszConfig =
-            CSLFetchNameValue(poOpenInfo->papszOpenOptions, "TILEDB_CONFIG");
-
-        if (pszConfig != nullptr)
-        {
-            return TRUE;
-        }
-
-        if (poOpenInfo->bIsDirectory ||
-            ((STARTS_WITH_CI(poOpenInfo->pszFilename, "/VSIS3/") ||
-              STARTS_WITH_CI(poOpenInfo->pszFilename, "/VSIGS/")) &&
-             !EQUAL(CPLGetExtension(poOpenInfo->pszFilename), "tif")))
+        try
         {
             tiledb::Context ctx;
             CPLString osArrayPath =
                 TileDBDataset::VSI_to_tiledb_uri(poOpenInfo->pszFilename);
-            const auto eType = tiledb::Object::object(ctx, osArrayPath).type();
-#ifdef HAS_TILEDB_GROUP
-            if ((poOpenInfo->nOpenFlags & GDAL_OF_VECTOR) != 0)
-            {
-                if (eType == tiledb::Object::Type::Array ||
-                    eType == tiledb::Object::Type::Group)
-                    return true;
-            }
-#endif
-#ifdef HAS_TILEDB_MULTIDIM
-            if ((poOpenInfo->nOpenFlags & GDAL_OF_MULTIDIM_RASTER) != 0)
-            {
-                if (eType == tiledb::Object::Type::Array ||
-                    eType == tiledb::Object::Type::Group)
-                    return true;
-            }
-#endif
-            if ((poOpenInfo->nOpenFlags & GDAL_OF_RASTER) != 0)
-            {
-                return eType == tiledb::Object::Type::Array;
-            }
+            if (TileDBDataset::TileDBObjectExists(osArrayPath))
+                nRet = TRUE;
+            else
+                nRet = FALSE;
         }
-
-        return FALSE;
+        catch (...)
+        {
+            nRet = FALSE;
+        }
     }
-    catch (...)
-    {
-        return FALSE;
-    }
+    return nRet;
 }
 
 /************************************************************************/
@@ -210,23 +174,36 @@ GDALDataset *TileDBDataset::Open(GDALOpenInfo *poOpenInfo)
 {
     try
     {
-        if (!TileDBDataset::Identify(poOpenInfo))
+        const auto eIdentify = TileDBDataset::Identify(poOpenInfo);
+        if (eIdentify == GDAL_IDENTIFY_FALSE)
             return nullptr;
 
         if (STARTS_WITH_CI(poOpenInfo->pszFilename, "TILEDB:") &&
             !STARTS_WITH_CI(poOpenInfo->pszFilename, "TILEDB://"))
         {
             // subdataset URI so this is a raster
-            return TileDBRasterDataset::Open(poOpenInfo);
+            return TileDBRasterDataset::Open(poOpenInfo,
+                                             tiledb::Object::Type::Invalid);
         }
         else
         {
-#ifdef HAS_TILEDB_MULTIDIM
+            const std::string osPath =
+                TileDBDataset::VSI_to_tiledb_uri(poOpenInfo->pszFilename);
+
+            // identify() identifies this as a request for a TileDB dataset but not whether it exists
+            if ((poOpenInfo->eAccess == GA_ReadOnly) &&
+                (!TileDBDataset::TileDBObjectExists(osPath)))
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Failed to open %s as an array or group.",
+                         poOpenInfo->pszFilename);
+                return nullptr;
+            }
+
             if ((poOpenInfo->nOpenFlags & GDAL_OF_MULTIDIM_RASTER) != 0)
             {
                 return TileDBDataset::OpenMultiDimensional(poOpenInfo);
             }
-#endif
 
             const char *pszConfig = CSLFetchNameValue(
                 poOpenInfo->papszOpenOptions, "TILEDB_CONFIG");
@@ -243,24 +220,110 @@ GDALDataset *TileDBDataset::Open(GDALOpenInfo *poOpenInfo)
                 cfg["sm.enable_signal_handlers"] = "false";
                 oCtx = tiledb::Context(cfg);
             }
-            const std::string osPath =
-                TileDBDataset::VSI_to_tiledb_uri(poOpenInfo->pszFilename);
 
             const auto eType = tiledb::Object::object(oCtx, osPath).type();
-#ifdef HAS_TILEDB_GROUP
+            std::string osDatasetType;
+            if (eType == tiledb::Object::Type::Group)
+            {
+                tiledb::Group group(oCtx, osPath, TILEDB_READ);
+                tiledb_datatype_t v_type = TILEDB_UINT8;
+                const void *v_r = nullptr;
+                uint32_t v_num = 0;
+                group.get_metadata(DATASET_TYPE_ATTRIBUTE_NAME, &v_type, &v_num,
+                                   &v_r);
+                if (v_r && (v_type == TILEDB_UINT8 || v_type == TILEDB_CHAR ||
+                            v_type == TILEDB_STRING_ASCII ||
+                            v_type == TILEDB_STRING_UTF8))
+                {
+                    osDatasetType =
+                        std::string(static_cast<const char *>(v_r), v_num);
+                }
+            }
+
             if ((poOpenInfo->nOpenFlags & GDAL_OF_VECTOR) != 0 &&
-                eType == tiledb::Object::Type::Group)
+                eType == tiledb::Object::Type::Group &&
+                (osDatasetType.empty() ||
+                 osDatasetType == GEOMETRY_DATASET_TYPE))
             {
                 return OGRTileDBDataset::Open(poOpenInfo, eType);
             }
-#endif
+            else if ((poOpenInfo->nOpenFlags & GDAL_OF_RASTER) != 0 &&
+                     (poOpenInfo->nOpenFlags & GDAL_OF_VECTOR) == 0 &&
+                     eType == tiledb::Object::Type::Group &&
+                     osDatasetType == GEOMETRY_DATASET_TYPE)
+            {
+                return nullptr;
+            }
+            else if ((poOpenInfo->nOpenFlags & GDAL_OF_RASTER) != 0 &&
+                     eType == tiledb::Object::Type::Group &&
+                     osDatasetType == RASTER_DATASET_TYPE)
+            {
+                return TileDBRasterDataset::Open(poOpenInfo, eType);
+            }
+            else if ((poOpenInfo->nOpenFlags & GDAL_OF_VECTOR) != 0 &&
+                     (poOpenInfo->nOpenFlags & GDAL_OF_RASTER) == 0 &&
+                     eType == tiledb::Object::Type::Group &&
+                     osDatasetType == RASTER_DATASET_TYPE)
+            {
+                return nullptr;
+            }
+            else if ((poOpenInfo->nOpenFlags & GDAL_OF_RASTER) != 0 &&
+                     eType == tiledb::Object::Type::Group &&
+                     osDatasetType.empty())
+            {
+                // Compatibility with generic arrays
+                // If this is a group which has only a single 2D array and
+                // no 3D+ arrays, then return this 2D array.
+                auto poDSUnique = std::unique_ptr<GDALDataset>(
+                    TileDBDataset::OpenMultiDimensional(poOpenInfo));
+                if (poDSUnique)
+                {
+                    auto poRootGroup = poDSUnique->GetRootGroup();
+                    if (poRootGroup && poRootGroup->GetGroupNames().empty())
+                    {
+                        std::shared_ptr<GDALMDArray> poCandidateArray;
+                        for (const auto &osName :
+                             poRootGroup->GetMDArrayNames())
+                        {
+                            auto poArray = poRootGroup->OpenMDArray(osName);
+                            if (poArray && poArray->GetDimensionCount() >= 3)
+                            {
+                                poCandidateArray.reset();
+                                break;
+                            }
+                            else if (poArray &&
+                                     poArray->GetDimensionCount() == 2 &&
+                                     poArray->GetDimensions()[0]->GetType() ==
+                                         GDAL_DIM_TYPE_HORIZONTAL_Y &&
+                                     poArray->GetDimensions()[1]->GetType() ==
+                                         GDAL_DIM_TYPE_HORIZONTAL_X)
+                            {
+                                if (!poCandidateArray)
+                                {
+                                    poCandidateArray = std::move(poArray);
+                                }
+                                else
+                                {
+                                    poCandidateArray.reset();
+                                    break;
+                                }
+                            }
+                        }
+                        if (poCandidateArray)
+                        {
+                            return poCandidateArray->AsClassicDataset(1, 0);
+                        }
+                    }
+                }
+                return nullptr;
+            }
 
             tiledb::ArraySchema schema(oCtx, osPath);
 
             if (schema.array_type() == TILEDB_SPARSE)
                 return OGRTileDBDataset::Open(poOpenInfo, eType);
             else
-                return TileDBRasterDataset::Open(poOpenInfo);
+                return TileDBRasterDataset::Open(poOpenInfo, eType);
         }
     }
     catch (const tiledb::TileDBError &e)
@@ -306,7 +369,6 @@ GDALDataset *TileDBDataset::CreateCopy(const char *pszFilename,
                                        void *pProgressData)
 
 {
-#ifdef HAS_TILEDB_MULTIDIM
     if (poSrcDS->GetRootGroup())
     {
         auto poDrv = GDALDriver::FromHandle(GDALGetDriverByName("TileDB"));
@@ -317,7 +379,6 @@ GDALDataset *TileDBDataset::CreateCopy(const char *pszFilename,
                                             pProgressData);
         }
     }
-#endif
 
     try
     {
@@ -341,237 +402,21 @@ GDALDataset *TileDBDataset::CreateCopy(const char *pszFilename,
 /*                         GDALRegister_TILEDB()                        */
 /************************************************************************/
 
-#define XSTRINGIFY(X) #X
-#define STRINGIFY(X) XSTRINGIFY(X)
-
 void GDALRegister_TileDB()
 
 {
-    if (GDALGetDriverByName("TileDB") != nullptr)
+    if (GDALGetDriverByName(DRIVER_NAME) != nullptr)
         return;
 
     GDALDriver *poDriver = new GDALDriver();
-
-    poDriver->SetDescription("TileDB");
-    poDriver->SetMetadataItem(GDAL_DCAP_RASTER, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_VECTOR, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_SUBCREATECOPY, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_LONGNAME, "TileDB");
-    poDriver->SetMetadataItem(GDAL_DMD_HELPTOPIC, "drivers/raster/tiledb.html");
-    poDriver->SetMetadataItem(GDAL_DMD_CREATIONDATATYPES,
-                              "Byte UInt16 Int16 UInt32 Int32 Float32 "
-                              "Float64 CInt16 CInt32 CFloat32 CFloat64");
-    poDriver->SetMetadataItem(GDAL_DCAP_VIRTUALIO, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_MEASURED_GEOMETRIES, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_CURVE_GEOMETRIES, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_Z_GEOMETRIES, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_SUBDATASETS, "YES");
-
-    poDriver->SetMetadataItem(GDAL_DCAP_CREATE_FIELD, "YES");
-    poDriver->SetMetadataItem(
-        GDAL_DMD_CREATIONFIELDDATATYPES,
-        "Integer Integer64 Real String Date Time DateTime "
-        "IntegerList Integer64List RealList Binary");
-    poDriver->SetMetadataItem(GDAL_DMD_CREATIONFIELDDATASUBTYPES,
-#ifdef HAS_TILEDB_BOOL
-                              "Boolean Int16 Float32"
-#else
-                              "Int16 Float32"
-#endif
-    );
-    poDriver->SetMetadataItem(
-        GDAL_DMD_CREATIONOPTIONLIST,
-        "<CreationOptionList>\n"
-        "   <Option name='COMPRESSION' scope='raster' type='string-select' "
-        "description='image "
-        "compression to use' default='NONE'>\n"
-        "       <Value>NONE</Value>\n"
-        "       <Value>GZIP</Value>\n"
-        "       <Value>ZSTD</Value>\n"
-        "       <Value>LZ4</Value>\n"
-        "       <Value>RLE</Value>\n"
-        "       <Value>BZIP2</Value>\n"
-        "       <Value>DOUBLE-DELTA</Value>\n"
-        "       <Value>POSITIVE-DELTA</Value>\n"
-        "   </Option>\n"
-        "   <Option name='COMPRESSION_LEVEL' scope='raster' type='int' "
-        "description='Compression level'/>\n"
-        "   <Option name='BLOCKXSIZE' scope='raster' type='int' "
-        "description='Tile Width'/>"
-        "   <Option name='BLOCKYSIZE' scope='raster' type='int' "
-        "description='Tile Height'/>"
-        "   <Option name='STATS' scope='raster' type='boolean' default='false' "
-        "description='Dump TileDB stats'/>"
-        "   <Option name='TILEDB_CONFIG' type='string' "
-        "description='location "
-        "of configuration file for TileDB'/>"
-        "   <Option name='TILEDB_ATTRIBUTE' scope='raster' type='string' "
-        "description='co-registered file to add as TileDB attributes, only "
-        "applicable for interleave types of band or pixel'/>"
-        "   <Option name='INTERLEAVE' scope='raster' type='string-select' "
-        "description='Indexing order' default='BAND'>\n"
-        "        <Value>BAND</Value>\n"
-        "        <Value>PIXEL</Value>\n"
-        "        <Value>ATTRIBUTES</Value>\n"
-        "   </Option>\n"
-        "   <Option name='TILEDB_TIMESTAMP' scope='raster' type='int' "
-        "description='Create "
-        "array at this timestamp, the timestamp should be > 0'/>\n"
-        "   <Option name='BOUNDS' scope='raster' type='string' "
-        "description='Specify "
-        "bounds for sparse array, minx, miny, maxx, maxy'/>\n"
-#ifdef HAS_TILEDB_GROUP
-        "   <Option name='CREATE_GROUP' scope='vector' type='boolean' "
-        "description='Whether to create a group for multiple layer support' "
-        "default='NO'/>"
-#endif
-        "</CreationOptionList>\n");
-
-    // clang-format off
-    poDriver->SetMetadataItem(
-        GDAL_DMD_OPENOPTIONLIST,
-        "<OpenOptionList>"
-        "   <Option name='STATS' scope='raster' type='boolean' default='false' "
-        "description='Dump TileDB stats'/>"
-        "   <Option name='TILEDB_ATTRIBUTE' scope='raster' type='string' "
-        "description='Attribute to read from each band'/>"
-        "   <Option name='TILEDB_CONFIG' type='string' description='location "
-        "of configuration file for TileDB'/>"
-        "   <Option name='TILEDB_TIMESTAMP' type='int' description='Open array "
-        "at this timestamp, the timestamp should be > 0'/>"
-        "   <Option name='BATCH_SIZE' scope='vector' type='int' default='"
-        STRINGIFY(DEFAULT_BATCH_SIZE) "' "
-        "description='Number of features to fetch/write at once'/>"
-        "   <Option name='DIM_X' type='string' scope='vector' default='_X' "
-        "description='Name of the X dimension.'/>"
-        "   <Option name='DIM_Y' type='string' scope='vector' default='_Y' "
-        "description='Name of the Y dimension.'/>"
-        "   <Option name='DIM_Z' type='string' scope='vector' default='_Z' "
-        "description='Name of the Z dimension.'/>"
-        "</OpenOptionList>");
-    // clang-format on
-
-    // clang-format off
-    poDriver->SetMetadataItem(
-        GDAL_DS_LAYER_CREATIONOPTIONLIST,
-        "<LayerCreationOptionList>"
-        "   <Option name='COMPRESSION' type='string-select' description='"
-        "Compression to use' default='NONE'>\n"
-        "       <Value>NONE</Value>\n"
-        "       <Value>GZIP</Value>\n"
-        "       <Value>ZSTD</Value>\n"
-        "       <Value>LZ4</Value>\n"
-        "       <Value>RLE</Value>\n"
-        "       <Value>BZIP2</Value>\n"
-        "       <Value>DOUBLE-DELTA</Value>\n"
-        "       <Value>POSITIVE-DELTA</Value>\n"
-        "   </Option>\n"
-        "   <Option name='COMPRESSION_LEVEL' type='int' "
-        "description='Compression level'/>\n"
-        "   <Option name='BATCH_SIZE' type='int' default='"
-        STRINGIFY(DEFAULT_BATCH_SIZE) "' "
-        "description='Number of features to write at once'/>"
-        "   <Option name='TILE_CAPACITY' type='int' default='"
-        STRINGIFY(DEFAULT_TILE_CAPACITY) "' "
-        "description='Number of non-empty cells stored in a data tile'/>"
-        "   <Option name='BOUNDS' type='string' description='Specify "
-        "bounds for sparse array, minx, miny, [minz,] maxx, maxy [, maxz]'/>\n"
-        "   <Option name='TILE_EXTENT' type='float' description='Specify "
-        "square X/Y tile extents for a sparse array'/>\n"
-        "   <Option name='TILE_Z_EXTENT' type='float' description='Specify "
-        "Z tile extents for a sparse array'/>\n"
-        "   <Option name='ADD_Z_DIM' type='string-select' description='"
-        "Whether to add a Z dimension' default='AUTO'>"
-        "       <Value>AUTO</Value>"
-        "       <Value>YES</Value>"
-        "       <Value>NO</Value>"
-        "   </Option>"
-        "   <Option name='FID' type='string' description='Feature id column "
-        "name. Set to empty to disable its creation.' default='FID'/>"
-        "   <Option name='GEOMETRY_NAME' type='string' description='Name "
-        "of the geometry column that will receive WKB encoded geometries. "
-        "Set to empty to disable its creation (only for point).' "
-        "default='wkb_geometry'/>"
-        "   <Option name='TILEDB_TIMESTAMP' type='int' description='Create "
-        "array at this timestamp, the timestamp should be > 0'/>"
-        "   <Option name='TILEDB_STRING_TYPE' type='string-select' "
-        "description='Which TileDB type to create string attributes' "
-#ifdef HAS_TILEDB_WORKING_UTF8_STRING_FILTER
-       "default='UTF8'"
-#else
-       "default='ASCII'"
-#endif
-        ">"
-        "       <Value>UTF8</Value>"
-        "       <Value>ASCII</Value>"
-        "   </Option>"
-        "   <Option name='STATS' type='boolean' default='false' "
-        "description='Dump TileDB stats'/>"
-        "</LayerCreationOptionList>");
-    // clang-format on
+    TileDBDriverSetCommonMetadata(poDriver);
 
     poDriver->pfnIdentify = TileDBDataset::Identify;
     poDriver->pfnOpen = TileDBDataset::Open;
     poDriver->pfnCreate = TileDBDataset::Create;
     poDriver->pfnCreateCopy = TileDBDataset::CreateCopy;
     poDriver->pfnDelete = TileDBDataset::Delete;
-#ifdef HAS_TILEDB_MULTIDIM
-    poDriver->SetMetadataItem(GDAL_DCAP_MULTIDIM_RASTER, "YES");
     poDriver->pfnCreateMultiDimensional = TileDBDataset::CreateMultiDimensional;
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_MULTIDIM_DATASET_CREATIONOPTIONLIST,
-        "<MultiDimDatasetCreationOptionList>"
-        "   <Option name='TILEDB_CONFIG' type='string' description='location "
-        "of configuration file for TileDB'/>"
-        "   <Option name='TILEDB_TIMESTAMP' type='int' description='Create "
-        "arrays at this timestamp, the timestamp should be > 0'/>"
-        "   <Option name='STATS' type='boolean' default='false' "
-        "description='Dump TileDB stats'/>"
-        "</MultiDimDatasetCreationOptionList>");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_MULTIDIM_ARRAY_OPENOPTIONLIST,
-        "<MultiDimArrayOpenOptionList>"
-        "   <Option name='TILEDB_TIMESTAMP' type='int' description='Open "
-        "array at this timestamp, the timestamp should be > 0'/>"
-        "</MultiDimArrayOpenOptionList>");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_MULTIDIM_ARRAY_CREATIONOPTIONLIST,
-        "<MultiDimArrayCreationOptionList>"
-        "   <Option name='TILEDB_TIMESTAMP' type='int' description='Create "
-        "array at this timestamp, the timestamp should be > 0'/>"
-        "   <Option name='BLOCKSIZE' type='int' description='Block size in "
-        "pixels'/>"
-        "   <Option name='COMPRESSION' type='string-select' description='"
-        "Compression to use' default='NONE'>\n"
-        "       <Value>NONE</Value>\n"
-        "       <Value>GZIP</Value>\n"
-        "       <Value>ZSTD</Value>\n"
-        "       <Value>LZ4</Value>\n"
-        "       <Value>RLE</Value>\n"
-        "       <Value>BZIP2</Value>\n"
-        "       <Value>DOUBLE-DELTA</Value>\n"
-        "       <Value>POSITIVE-DELTA</Value>\n"
-        "   </Option>\n"
-        "   <Option name='COMPRESSION_LEVEL' type='int' "
-        "description='Compression level'/>\n"
-        "   <Option name='STATS' type='boolean' default='false' "
-        "description='Dump TileDB stats'/>"
-        "   <Option name='IN_MEMORY'  type='boolean' default='false' "
-        "description='Whether the array should be only in-memory. Useful to "
-        "create an indexing variable that is serialized as a dimension label'/>"
-        "</MultiDimArrayCreationOptionList>");
-#endif
-
-#if !defined(HAS_TILEDB_WORKING_UTF8_STRING_FILTER)
-    poDriver->SetMetadataItem("HAS_TILEDB_WORKING_UTF8_STRING_FILTER", "NO");
-#endif
-
-#if !defined(HAS_TILEDB_WORKING_OR_FILTER)
-    poDriver->SetMetadataItem("HAS_TILEDB_WORKING_OR_FILTER", "NO");
-#endif
 
     GetGDALDriverManager()->RegisterDriver(poDriver);
 }

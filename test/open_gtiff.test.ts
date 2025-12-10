@@ -3,8 +3,7 @@ import * as path from 'path'
 import { assert } from 'chai'
 
 describe('Open', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   before(() => {
     gdal.config.set('GDAL_PAM_ENABLED', 'NO')
@@ -69,6 +68,27 @@ describe('Open', () => {
       assert.closeTo(actual_stats.max, expected_stats.max, delta)
       assert.closeTo(actual_stats.mean, expected_stats.mean, delta)
       assert.closeTo(actual_stats.std_dev, expected_stats.std_dev, delta)
+    })
+
+    it('should support generating overviews', () => {
+      gdal.config.set('TIFF_USE_OVR', 'YES')
+      gdal.config.set('COMPRESS_OVERVIEW', 'DEFLATE')
+      const ds = gdal.open(path.join(__dirname, 'data/natural_earth.tif'), 'r+')
+      ds.buildOverviews('NEAREST', [ 2, 4, 8, 16 ])
+      const overviews = Array.from(ds.bands.get(1).overviews)
+      assert.lengthOf(overviews, 4)
+      for (const o of overviews) {
+        assert.instanceOf(o, gdal.RasterBand)
+      }
+    })
+
+    it('with bundled GDAL, should support LIBERTIFF', () => {
+      const driver = gdal.drivers.get('LIBERTIFF')
+      filename = path.join(__dirname, 'data/sample.tif')
+      ds = driver.open(filename)
+      assert.instanceOf(ds, gdal.Dataset)
+      assert.strictEqual(ds.driver.description, 'LIBERTIFF')
+      assert.strictEqual(ds.threadSafe, true)
     })
   })
 })

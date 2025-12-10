@@ -8,33 +8,19 @@
  * Copyright (c) 2003, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2008-2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
 #include "vrtdataset.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 
 #include "cpl_conv.h"
 #include "cpl_error.h"
@@ -128,7 +114,8 @@ CPLErr VRTFilteredSource::RasterIO(GDALDataType eVRTBandDataType, int nXOff,
                                    void *pData, int nBufXSize, int nBufYSize,
                                    GDALDataType eBufType, GSpacing nPixelSpace,
                                    GSpacing nLineSpace,
-                                   GDALRasterIOExtraArg *psExtraArg)
+                                   GDALRasterIOExtraArg *psExtraArg,
+                                   WorkingState &oWorkingState)
 
 {
     /* -------------------------------------------------------------------- */
@@ -140,7 +127,8 @@ CPLErr VRTFilteredSource::RasterIO(GDALDataType eVRTBandDataType, int nXOff,
     {
         return VRTComplexSource::RasterIO(
             eVRTBandDataType, nXOff, nYOff, nXSize, nYSize, pData, nBufXSize,
-            nBufYSize, eBufType, nPixelSpace, nLineSpace, psExtraArg);
+            nBufYSize, eBufType, nPixelSpace, nLineSpace, psExtraArg,
+            oWorkingState);
     }
 
     double dfXOff = nXOff;
@@ -220,8 +208,8 @@ CPLErr VRTFilteredSource::RasterIO(GDALDataType eVRTBandDataType, int nXOff,
 
         for (int i = 1; i < m_nSupportedTypesCount; i++)
         {
-            if (GDALGetDataTypeSize(m_aeSupportedTypes[i]) >
-                GDALGetDataTypeSize(eOperDataType))
+            if (GDALGetDataTypeSizeBytes(m_aeSupportedTypes[i]) >
+                GDALGetDataTypeSizeBytes(eOperDataType))
             {
                 eOperDataType = m_aeSupportedTypes[i];
             }
@@ -252,7 +240,18 @@ CPLErr VRTFilteredSource::RasterIO(GDALDataType eVRTBandDataType, int nXOff,
     const GPtrDiff_t nPixelOffset = GDALGetDataTypeSizeBytes(eOperDataType);
     const GPtrDiff_t nLineOffset = nPixelOffset * nExtraXSize;
 
-    memset(pabyWorkData, 0, nLineOffset * nExtraYSize);
+    int bHasNoData = false;
+    const double dfSrcNoDataValue = l_band->GetNoDataValue(&bHasNoData);
+    if (bHasNoData)
+    {
+        GDALCopyWords64(&dfSrcNoDataValue, GDT_Float64, 0, pabyWorkData,
+                        eOperDataType, static_cast<int>(nPixelOffset),
+                        static_cast<size_t>(nExtraXSize) * nExtraYSize);
+    }
+    else
+    {
+        memset(pabyWorkData, 0, nLineOffset * nExtraYSize);
+    }
 
     /* -------------------------------------------------------------------- */
     /*      Allocate the output buffer in the same dimensions as the work   */
@@ -321,7 +320,8 @@ CPLErr VRTFilteredSource::RasterIO(GDALDataType eVRTBandDataType, int nXOff,
             nFileYSize,
             pabyWorkData + nLineOffset * nTopFill + nPixelOffset * nLeftFill,
             nFileXSize, nFileYSize, eOperDataType, nPixelOffset, nLineOffset,
-            &sExtraArgs, bIsComplex ? GDT_CFloat32 : GDT_Float32);
+            &sExtraArgs, bIsComplex ? GDT_CFloat32 : GDT_Float32,
+            oWorkingState);
 
         if (eErr != CE_None)
         {
@@ -417,28 +417,26 @@ CPLErr VRTFilteredSource::RasterIO(GDALDataType eVRTBandDataType, int nXOff,
 /************************************************************************/
 
 VRTKernelFilteredSource::VRTKernelFilteredSource()
-    : m_nKernelSize(0), m_bSeparable(FALSE), m_padfKernelCoefs(nullptr),
-      m_bNormalized(FALSE)
 {
     GDALDataType aeSupTypes[] = {GDT_Float32};
     SetFilteringDataTypesSupported(1, aeSupTypes);
 }
 
 /************************************************************************/
-/*                      ~VRTKernelFilteredSource()                      */
+/*                            GetType()                                 */
 /************************************************************************/
 
-VRTKernelFilteredSource::~VRTKernelFilteredSource()
-
+const char *VRTKernelFilteredSource::GetType() const
 {
-    CPLFree(m_padfKernelCoefs);
+    static const char *TYPE = "KernelFilteredSource";
+    return TYPE;
 }
 
 /************************************************************************/
 /*                           SetNormalized()                            */
 /************************************************************************/
 
-void VRTKernelFilteredSource::SetNormalized(int bNormalizedIn)
+void VRTKernelFilteredSource::SetNormalized(bool bNormalizedIn)
 
 {
     m_bNormalized = bNormalizedIn;
@@ -448,8 +446,9 @@ void VRTKernelFilteredSource::SetNormalized(int bNormalizedIn)
 /*                             SetKernel()                              */
 /************************************************************************/
 
-CPLErr VRTKernelFilteredSource::SetKernel(int nNewKernelSize, bool bSeparable,
-                                          double *padfNewCoefs)
+CPLErr
+VRTKernelFilteredSource::SetKernel(int nNewKernelSize, bool bSeparable,
+                                   const std::vector<double> &adfNewCoefs)
 
 {
     if (nNewKernelSize < 1 || (nNewKernelSize % 2) != 1)
@@ -460,16 +459,17 @@ CPLErr VRTKernelFilteredSource::SetKernel(int nNewKernelSize, bool bSeparable,
                  nNewKernelSize);
         return CE_Failure;
     }
+    if (adfNewCoefs.size() !=
+        static_cast<size_t>(nNewKernelSize) * (bSeparable ? 1 : nNewKernelSize))
+    {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "adfNewCoefs[] is not of expected size");
+        return CE_Failure;
+    }
 
-    CPLFree(m_padfKernelCoefs);
     m_nKernelSize = nNewKernelSize;
     m_bSeparable = bSeparable;
-
-    int nKernelBufferSize = m_nKernelSize * (m_bSeparable ? 1 : m_nKernelSize);
-
-    m_padfKernelCoefs =
-        static_cast<double *>(CPLMalloc(sizeof(double) * nKernelBufferSize));
-    memcpy(m_padfKernelCoefs, padfNewCoefs, sizeof(double) * nKernelBufferSize);
+    m_adfKernelCoefs = adfNewCoefs;
 
     SetExtraEdgePixels((nNewKernelSize - 1) / 2);
 
@@ -500,6 +500,12 @@ CPLErr VRTKernelFilteredSource::FilterData(int nXSize, int nYSize,
 
     CPLAssert(m_nExtraEdgePixels * 2 + 1 == m_nKernelSize ||
               (m_nKernelSize == 0 && m_nExtraEdgePixels == 0));
+
+    const bool bMin = m_function == "min";
+    const bool bMax = m_function == "max";
+    const bool bStdDev = m_function == "stddev";
+    const bool bMedian = m_function == "median";
+    const bool bMode = m_function == "mode";
 
     /* -------------------------------------------------------------------- */
     /*      Float32 case.                                                   */
@@ -538,7 +544,8 @@ CPLErr VRTKernelFilteredSource::FilterData(int nXSize, int nYSize,
 
                 for (int iI = nIMin; iI < nIMax; ++iI)
                 {
-                    const GPtrDiff_t iIndex = iI * nIStride + iJ * nJStride;
+                    const GPtrDiff_t iIndex =
+                        static_cast<GPtrDiff_t>(iI) * nIStride + iJ * nJStride;
 
                     if (bHasNoData && pafSrcData[iIndex] == fNoData)
                     {
@@ -547,6 +554,16 @@ CPLErr VRTKernelFilteredSource::FilterData(int nXSize, int nYSize,
                     }
 
                     double dfSum = 0.0, dfKernSum = 0.0;
+                    size_t nValidCount = 0;
+                    double dfRes =
+                        bMin   ? std::numeric_limits<double>::infinity()
+                        : bMax ? -std::numeric_limits<double>::infinity()
+                               : 0.0;
+                    double dfMean = 0.0;
+                    double dfM2 = 0.0;
+                    std::vector<double> adfVals;
+                    std::map<double, size_t> mapValToCount;
+                    size_t maxCount = 0;
 
                     for (GPtrDiff_t iII = -m_nExtraEdgePixels, iK = 0;
                          iII <= m_nExtraEdgePixels; ++iII)
@@ -559,22 +576,110 @@ CPLErr VRTKernelFilteredSource::FilterData(int nXSize, int nYSize,
                             const float *pfData = pafSrcData + iIndex +
                                                   iII * nIStride +
                                                   iJJ * nJStride;
-                            if (bHasNoData && *pfData == fNoData)
+                            if (bHasNoData &&
+                                (*pfData == fNoData || std::isnan(*pfData)))
+                            {
                                 continue;
-                            dfSum += *pfData * m_padfKernelCoefs[iK];
-                            dfKernSum += m_padfKernelCoefs[iK];
+                            }
+                            if (m_adfKernelCoefs[iK] == 0.0)
+                            {
+                                continue;
+                            }
+                            const double dfVal = static_cast<double>(*pfData) *
+                                                 m_adfKernelCoefs[iK];
+                            ++nValidCount;
+
+                            if (bMax)
+                            {
+                                if (dfVal > dfRes)
+                                    dfRes = dfVal;
+                            }
+                            else if (bMin)
+                            {
+                                if (dfVal < dfRes)
+                                    dfRes = dfVal;
+                            }
+                            else if (bStdDev)
+                            {
+                                const double dfDelta = dfVal - dfMean;
+                                dfMean += dfDelta / nValidCount;
+                                dfM2 += dfDelta * (dfVal - dfMean);
+                            }
+                            else if (bMedian)
+                            {
+                                adfVals.push_back(dfVal);
+                            }
+                            else if (bMode)
+                            {
+                                const size_t nCountVal = ++mapValToCount[dfVal];
+                                if (nCountVal > maxCount)
+                                {
+                                    maxCount = nCountVal;
+                                    dfRes = dfVal;
+                                }
+                            }
+                            else
+                            {
+                                dfSum += dfVal;
+                                dfKernSum += m_adfKernelCoefs[iK];
+                            }
                         }
                     }
 
-                    double fResult;
-
-                    if (!m_bNormalized)
-                        fResult = dfSum;
-                    else if (dfKernSum == 0.0)
-                        fResult = 0.0;
+                    float fResult;
+                    if (bMax || bMin || bMode)
+                    {
+                        fResult = nValidCount  ? static_cast<float>(dfRes)
+                                  : bHasNoData ? fNoData
+                                               : 0.0f;
+                    }
+                    else if (bStdDev)
+                    {
+                        fResult =
+                            nValidCount
+                                ? static_cast<float>(sqrt(
+                                      dfM2 / static_cast<double>(nValidCount)))
+                            : bHasNoData ? fNoData
+                                         : 0.0f;
+                    }
+                    else if (bMedian)
+                    {
+                        if (!adfVals.empty())
+                        {
+                            if ((adfVals.size() % 2) == 1)
+                            {
+                                std::nth_element(adfVals.begin(),
+                                                 adfVals.begin() +
+                                                     adfVals.size() / 2,
+                                                 adfVals.end());
+                                dfRes = adfVals[adfVals.size() / 2];
+                            }
+                            else
+                            {
+                                std::nth_element(adfVals.begin(),
+                                                 adfVals.begin() +
+                                                     adfVals.size() / 2 - 1,
+                                                 adfVals.end());
+                                dfRes = adfVals[adfVals.size() / 2 - 1];
+                                std::nth_element(adfVals.begin(),
+                                                 adfVals.begin() +
+                                                     adfVals.size() / 2,
+                                                 adfVals.end());
+                                dfRes =
+                                    (dfRes + adfVals[adfVals.size() / 2]) / 2;
+                            }
+                            fResult = static_cast<float>(dfRes);
+                        }
+                        else
+                            fResult = bHasNoData ? fNoData : 0.0f;
+                    }
+                    else if (!m_bNormalized)
+                        fResult = static_cast<float>(dfSum);
+                    else if (nValidCount == 0 || dfKernSum == 0.0)
+                        fResult = bHasNoData ? fNoData : 0.0f;
                     else
-                        fResult = dfSum / dfKernSum;
-                    pafDstData[iIndex] = static_cast<float>(fResult);
+                        fResult = static_cast<float>(dfSum / dfKernSum);
+                    pafDstData[iIndex] = fResult;
                 }
             }
         }
@@ -587,9 +692,10 @@ CPLErr VRTKernelFilteredSource::FilterData(int nXSize, int nYSize,
 /*                              XMLInit()                               */
 /************************************************************************/
 
-CPLErr VRTKernelFilteredSource::XMLInit(
-    CPLXMLNode *psTree, const char *pszVRTPath,
-    std::map<CPLString, GDALDataset *> &oMapSharedSources)
+CPLErr
+VRTKernelFilteredSource::XMLInit(const CPLXMLNode *psTree,
+                                 const char *pszVRTPath,
+                                 VRTMapSharedResources &oMapSharedSources)
 
 {
     {
@@ -614,17 +720,16 @@ CPLErr VRTKernelFilteredSource::XMLInit(
         return CE_Failure;
     }
 
-    char **papszCoefItems =
-        CSLTokenizeString(CPLGetXMLValue(psTree, "Kernel.Coefs", ""));
+    const CPLStringList aosCoefItems(
+        CSLTokenizeString(CPLGetXMLValue(psTree, "Kernel.Coefs", "")));
 
-    const int nCoefs = CSLCount(papszCoefItems);
+    const int nCoefs = aosCoefItems.size();
 
     const bool bSquare = nCoefs == nNewKernelSize * nNewKernelSize;
     const bool bSeparable = nCoefs == nNewKernelSize && nCoefs != 1;
 
     if (!bSquare && !bSeparable)
     {
-        CSLDestroy(papszCoefItems);
         CPLError(CE_Failure, CPLE_AppDefined,
                  "Got wrong number of filter kernel coefficients (%s).  "
                  "Expected %d or %d, got %d.",
@@ -633,18 +738,31 @@ CPLErr VRTKernelFilteredSource::XMLInit(
         return CE_Failure;
     }
 
-    double *padfNewCoefs =
-        static_cast<double *>(CPLMalloc(sizeof(double) * nCoefs));
-
+    std::vector<double> adfNewCoefs;
+    adfNewCoefs.reserve(nCoefs);
     for (int i = 0; i < nCoefs; i++)
-        padfNewCoefs[i] = CPLAtof(papszCoefItems[i]);
+        adfNewCoefs.push_back(CPLAtof(aosCoefItems[i]));
 
-    const CPLErr eErr = SetKernel(nNewKernelSize, bSeparable, padfNewCoefs);
+    const CPLErr eErr = SetKernel(nNewKernelSize, bSeparable, adfNewCoefs);
+    if (eErr == CE_None)
+    {
+        SetNormalized(atoi(CPLGetXMLValue(psTree, "Kernel.normalized", "0")) !=
+                      0);
+    }
 
-    CPLFree(padfNewCoefs);
-    CSLDestroy(papszCoefItems);
-
-    SetNormalized(atoi(CPLGetXMLValue(psTree, "Kernel.normalized", "0")));
+    const char *pszFunction = CPLGetXMLValue(psTree, "Function", nullptr);
+    if (pszFunction)
+    {
+        if (!EQUAL(pszFunction, "max") && !EQUAL(pszFunction, "min") &&
+            !EQUAL(pszFunction, "median") && !EQUAL(pszFunction, "mode") &&
+            !EQUAL(pszFunction, "stddev"))
+        {
+            CPLError(CE_Failure, CPLE_IllegalArg, "Unsupported function: %s",
+                     pszFunction);
+            return CE_Failure;
+        }
+        SetFunction(pszFunction);
+    }
 
     return eErr;
 }
@@ -669,29 +787,22 @@ CPLXMLNode *VRTKernelFilteredSource::SerializeToXML(const char *pszVRTPath)
 
     CPLXMLNode *psKernel = CPLCreateXMLNode(psSrc, CXT_Element, "Kernel");
 
-    if (m_bNormalized)
-        CPLCreateXMLNode(
-            CPLCreateXMLNode(psKernel, CXT_Attribute, "normalized"), CXT_Text,
-            "1");
-    else
-        CPLCreateXMLNode(
-            CPLCreateXMLNode(psKernel, CXT_Attribute, "normalized"), CXT_Text,
-            "0");
+    CPLCreateXMLNode(CPLCreateXMLNode(psKernel, CXT_Attribute, "normalized"),
+                     CXT_Text, m_bNormalized ? "1" : "0");
 
-    const int nCoefCount = m_nKernelSize * m_nKernelSize;
-    const size_t nBufLen = nCoefCount * 32;
-    char *pszKernelCoefs = static_cast<char *>(CPLMalloc(nBufLen));
-
-    strcpy(pszKernelCoefs, "");
-    for (int iCoef = 0; iCoef < nCoefCount; iCoef++)
-        CPLsnprintf(pszKernelCoefs + strlen(pszKernelCoefs),
-                    nBufLen - strlen(pszKernelCoefs), "%.8g ",
-                    m_padfKernelCoefs[iCoef]);
+    std::string osCoefs;
+    for (auto dfVal : m_adfKernelCoefs)
+    {
+        if (!osCoefs.empty())
+            osCoefs += ' ';
+        osCoefs += CPLSPrintf("%.8g", dfVal);
+    }
 
     CPLSetXMLValue(psKernel, "Size", CPLSPrintf("%d", m_nKernelSize));
-    CPLSetXMLValue(psKernel, "Coefs", pszKernelCoefs);
+    CPLSetXMLValue(psKernel, "Coefs", osCoefs.c_str());
 
-    CPLFree(pszKernelCoefs);
+    if (!m_function.empty())
+        CPLCreateXMLElementAndValue(psSrc, "Function", m_function.c_str());
 
     return psSrc;
 }
@@ -700,9 +811,9 @@ CPLXMLNode *VRTKernelFilteredSource::SerializeToXML(const char *pszVRTPath)
 /*                       VRTParseFilterSources()                        */
 /************************************************************************/
 
-VRTSource *
-VRTParseFilterSources(CPLXMLNode *psChild, const char *pszVRTPath,
-                      std::map<CPLString, GDALDataset *> &oMapSharedSources)
+VRTSource *VRTParseFilterSources(const CPLXMLNode *psChild,
+                                 const char *pszVRTPath,
+                                 VRTMapSharedResources &oMapSharedSources)
 
 {
     if (EQUAL(psChild->pszValue, "KernelFilteredSource"))

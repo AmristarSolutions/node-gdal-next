@@ -3,8 +3,7 @@ import { assert } from 'chai'
 import * as semver from 'semver'
 
 describe('gdal', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('suggestedWarpOutput()', () => {
     let src: gdal.Dataset
@@ -85,7 +84,7 @@ describe('gdal', () => {
     afterEach(() => {
       try {
         src.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -134,6 +133,7 @@ describe('gdal', () => {
 
       // transform cutline to source dataset px/line coordinates
       const geotransformer = new gdal.CoordinateTransformation(t_srs, src)
+      assert.isNotNull(cutline)
       cutline.transform(geotransformer)
 
       // compute output geotransform / dimensions

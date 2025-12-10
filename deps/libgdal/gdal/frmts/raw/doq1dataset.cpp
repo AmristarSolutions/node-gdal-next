@@ -8,30 +8,19 @@
  * Copyright (c) 1999, Frank Warmerdam
  * Copyright (c) 2009-2011, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "gdal_frmts.h"
 #include "cpl_string.h"
+#include "gdal_priv.h"
 #include "rawdataset.h"
 
 #include <algorithm>
+#include <cmath>
+
+#ifndef UTM_FORMAT_defined
+#define UTM_FORMAT_defined
 
 static const char UTM_FORMAT[] =
     "PROJCS[\"%s / UTM zone %dN\",GEOGCS[%s,PRIMEM[\"Greenwich\",0],"
@@ -53,6 +42,8 @@ static const char NAD27_DATUM[] =
 static const char NAD83_DATUM[] =
     "\"NAD83\",DATUM[\"North_American_Datum_1983\","
     "SPHEROID[\"GRS 1980\",6378137,298.257222101]]";
+
+#endif
 
 /************************************************************************/
 /*                            DOQGetField()                             */
@@ -126,9 +117,10 @@ class DOQ1Dataset final : public RawDataset
 
   public:
     DOQ1Dataset();
-    ~DOQ1Dataset();
+    ~DOQ1Dataset() override;
 
-    CPLErr GetGeoTransform(double *padfTransform) override;
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
+
     const OGRSpatialReference *GetSpatialRef() const override
     {
         return m_oSRS.IsEmpty() ? nullptr : &m_oSRS;
@@ -187,15 +179,15 @@ CPLErr DOQ1Dataset::Close()
 /*                          GetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr DOQ1Dataset::GetGeoTransform(double *padfTransform)
+CPLErr DOQ1Dataset::GetGeoTransform(GDALGeoTransform &gt) const
 
 {
-    padfTransform[0] = dfULX;
-    padfTransform[1] = dfXPixelSize;
-    padfTransform[2] = 0.0;
-    padfTransform[3] = dfULY;
-    padfTransform[4] = 0.0;
-    padfTransform[5] = -1 * dfYPixelSize;
+    gt[0] = dfULX;
+    gt[1] = dfXPixelSize;
+    gt[2] = 0.0;
+    gt[3] = dfULY;
+    gt[4] = 0.0;
+    gt[5] = -1 * dfYPixelSize;
 
     return CE_None;
 }
@@ -225,10 +217,10 @@ GDALDataset *DOQ1Dataset::Open(GDALOpenInfo *poOpenInfo)
     /*      Do these values look coherent for a DOQ file?  It would be      */
     /*      nice to do a more comprehensive test than this!                 */
     /* -------------------------------------------------------------------- */
-    if (dfWidth < 500 || dfWidth > 25000 || CPLIsNan(dfWidth) ||
-        dfHeight < 500 || dfHeight > 25000 || CPLIsNan(dfHeight) ||
-        dfBandStorage < 0 || dfBandStorage > 4 || CPLIsNan(dfBandStorage) ||
-        dfBandTypes < 1 || dfBandTypes > 9 || CPLIsNan(dfBandTypes))
+    if (dfWidth < 500 || dfWidth > 25000 || std::isnan(dfWidth) ||
+        dfHeight < 500 || dfHeight > 25000 || std::isnan(dfHeight) ||
+        dfBandStorage < 0 || dfBandStorage > 4 || std::isnan(dfBandStorage) ||
+        dfBandTypes < 1 || dfBandTypes > 9 || std::isnan(dfBandTypes))
         return nullptr;
 
     const int nWidth = static_cast<int>(dfWidth);
@@ -253,16 +245,14 @@ GDALDataset *DOQ1Dataset::Open(GDALOpenInfo *poOpenInfo)
     /* -------------------------------------------------------------------- */
     if (poOpenInfo->eAccess == GA_Update)
     {
-        CPLError(CE_Failure, CPLE_NotSupported,
-                 "The DOQ1 driver does not support update access to existing "
-                 "datasets.");
+        ReportUpdateNotSupportedByDriver("DOQ1");
         return nullptr;
     }
 
     /* -------------------------------------------------------------------- */
     /*      Create a corresponding GDALDataset.                             */
     /* -------------------------------------------------------------------- */
-    auto poDS = cpl::make_unique<DOQ1Dataset>();
+    auto poDS = std::make_unique<DOQ1Dataset>();
 
     /* -------------------------------------------------------------------- */
     /*      Capture some information from the file that is of interest.     */

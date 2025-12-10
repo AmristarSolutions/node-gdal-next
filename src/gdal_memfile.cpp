@@ -8,7 +8,10 @@ namespace node_gdal {
  * @namespace vsimem
  */
 
+// These are the currently used by GDAL Node.js buffers
 std::map<void *, Memfile *> Memfile::memfile_collection;
+// These are the currently tracked GDAL internal buffers
+std::map<void *, size_t> Memfile::tracked_buffers;
 
 Memfile::Memfile(void *data, const std::string &filename) : data(data), filename(filename) {
 }
@@ -21,6 +24,7 @@ Memfile::Memfile(void *data) : data(data) {
 }
 
 Memfile::~Memfile() {
+  if (persistent && !persistent->IsEmpty()) { persistent->Reset(); }
   delete persistent;
 }
 
@@ -28,6 +32,8 @@ void Memfile::weakCallback(const Nan::WeakCallbackInfo<Memfile> &file) {
   Memfile *mem = file.GetParameter();
   memfile_collection.erase(mem->data);
   VSIUnlink(mem->filename.c_str());
+  delete mem->persistent;
+  mem->persistent = nullptr;
   delete mem;
 }
 
@@ -92,8 +98,6 @@ bool Memfile::copy(Local<Object> buffer, const std::string &filename) {
   void *dataCopy = CPLMalloc(len);
   if (dataCopy == nullptr) return false;
 
-  // If you malloc, you adjust external memory too (https://github.com/nodejs/node/issues/40936)
-  Nan::AdjustExternalMemory(len);
   memcpy(dataCopy, data, len);
 
   VSILFILE *vsi = VSIFileFromMemBuffer(filename.c_str(), (GByte *)dataCopy, len, 1);
@@ -101,6 +105,11 @@ bool Memfile::copy(Local<Object> buffer, const std::string &filename) {
     CPLFree(dataCopy);
     return false;
   }
+
+  // If you malloc, you adjust external memory too (https://github.com/nodejs/node/issues/40936)
+  Memfile::tracked_buffers.insert({dataCopy, len});
+  Nan::AdjustExternalMemory(len);
+
   VSIFCloseL(vsi);
   return true;
 }
@@ -223,19 +232,23 @@ NAN_METHOD(Memfile::vsimemRelease) {
     // -> a new Buffer is constructed and GDAL has to relinquish control
     // The GC will call the lambda at some point to free the backing storage
     VSIGetMemFileBuffer(filename.c_str(), &len, true);
-    // Alas we can't take the address of a capturing lambda
-    // so we fall back to doing this like it was back in the day
-    int *hint = new int{static_cast<int>(len)};
     info.GetReturnValue().Set(Nan::NewBuffer(
                                 static_cast<char *>(data),
                                 static_cast<size_t>(len),
-                                [](char *data, void *hint) {
-                                  int *len = reinterpret_cast<int *>(hint);
-                                  Nan::AdjustExternalMemory(-(*len));
-                                  delete len;
+                                [](char *data, void *) {
+                                  // If the returned internal buffer is tracked towards the heap
+                                  // signal the GC that we are releasing the amount we
+                                  // initially counted - even if by now this amount might be
+                                  // different
+                                  std::map<void *, size_t>::iterator b =
+                                    Memfile::tracked_buffers.find(static_cast<void *>(data));
+                                  if (b != Memfile::tracked_buffers.end()) {
+                                    Nan::AdjustExternalMemory(-(static_cast<int>(b->second)));
+                                    Memfile::tracked_buffers.erase(b);
+                                  }
                                   CPLFree(data);
                                 },
-                                hint)
+                                nullptr)
                                 .ToLocalChecked());
   }
 }

@@ -6,25 +6,10 @@
  ******************************************************************************
  * Copyright (c) 2019, Even Rouault <even.rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
+#include "cpl_multiproc.h"
 #include "hdf4dataset.h"
 
 #include "hdf.h"
@@ -33,6 +18,7 @@
 #include "HdfEosDef.h"
 
 #include "cpl_string.h"
+#include "gdal_pam_multidim.h"
 
 #include <algorithm>
 #include <map>
@@ -53,8 +39,8 @@ class HDF4SharedResources
 {
     friend class ::HDF4Dataset;
     int32 m_hSD = -1;
-    std::string m_osFilename;
-    CPLStringList m_aosOpenOptions;
+    std::string m_osFilename{};
+    CPLStringList m_aosOpenOptions{};
     std::shared_ptr<GDALPamMultiDim> m_poPAM{};
 
   public:
@@ -65,10 +51,12 @@ class HDF4SharedResources
     {
         return m_hSD;
     }
+
     const std::string &GetFilename() const
     {
         return m_osFilename;
     }
+
     const char *FetchOpenOption(const char *pszName,
                                 const char *pszDefault) const
     {
@@ -129,7 +117,7 @@ class HDF4Group final : public GDALGroup
 /*                         HDF4AbstractAttribute                        */
 /************************************************************************/
 
-class HDF4AbstractAttribute : public GDALAttribute
+class HDF4AbstractAttribute /* non final */ : public GDALAttribute
 {
     std::shared_ptr<HDF4SharedResources> m_poShared;
     std::vector<std::shared_ptr<GDALDimension>> m_dims{};
@@ -173,6 +161,7 @@ struct HDF4SwathsHandle
     explicit HDF4SwathsHandle(int32 handle) : m_handle(handle)
     {
     }
+
     ~HDF4SwathsHandle()
     {
         CPLMutexHolderD(&hHDF4Mutex);
@@ -194,6 +183,7 @@ struct HDF4SwathHandle
         : m_poSwathsHandle(poSwathsHandle), m_handle(handle)
     {
     }
+
     ~HDF4SwathHandle()
     {
         CPLMutexHolderD(&hHDF4Mutex);
@@ -376,11 +366,13 @@ class HDF4SwathAttribute final : public HDF4AbstractAttribute
     {
     }
 
-    void ReadData(void *pDstBuffer) const override
-    {
-        SWreadattr(m_poSwathHandle->m_handle, GetName().c_str(), pDstBuffer);
-    }
+    void ReadData(void *pDstBuffer) const override;
 };
+
+void HDF4SwathAttribute::ReadData(void *pDstBuffer) const
+{
+    SWreadattr(m_poSwathHandle->m_handle, GetName().c_str(), pDstBuffer);
+}
 
 /************************************************************************/
 /*                             HDF4GDsHandle                             */
@@ -393,6 +385,7 @@ struct HDF4GDsHandle
     explicit HDF4GDsHandle(int32 handle) : m_handle(handle)
     {
     }
+
     ~HDF4GDsHandle()
     {
         CPLMutexHolderD(&hHDF4Mutex);
@@ -414,6 +407,7 @@ struct HDF4GDHandle
         : m_poGDsHandle(poGDsHandle), m_handle(handle)
     {
     }
+
     ~HDF4GDHandle()
     {
         CPLMutexHolderD(&hHDF4Mutex);
@@ -466,6 +460,7 @@ class HDF4EOSGridGroup final : public GDALGroup
           m_poGDHandle(poGDHandle)
     {
     }
+
     std::vector<std::shared_ptr<GDALDimension>>
     GetDimensions(CSLConstList papszOptions = nullptr) const override;
 
@@ -619,11 +614,13 @@ class HDF4EOSGridAttribute final : public HDF4AbstractAttribute
     {
     }
 
-    void ReadData(void *pDstBuffer) const override
-    {
-        GDreadattr(m_poGDHandle->m_handle, GetName().c_str(), pDstBuffer);
-    }
+    void ReadData(void *pDstBuffer) const override;
 };
+
+void HDF4EOSGridAttribute::ReadData(void *pDstBuffer) const
+{
+    GDreadattr(m_poGDHandle->m_handle, GetName().c_str(), pDstBuffer);
+}
 
 /************************************************************************/
 /*                             HDF4SDSGroup                             */
@@ -652,6 +649,7 @@ class HDF4SDSGroup final : public GDALGroup
     {
         m_bIsGDALDataset = true;
     }
+
     void SetGlobalAttributes(
         const std::vector<std::shared_ptr<GDALAttribute>> &attrs)
     {
@@ -711,7 +709,7 @@ class HDF4SDSArray final : public GDALPamMDArray
         return ar;
     }
 
-    ~HDF4SDSArray();
+    ~HDF4SDSArray() override;
 
     void SetGlobalAttributes(
         const std::vector<std::shared_ptr<GDALAttribute>> &attrs)
@@ -774,6 +772,7 @@ struct HDF4GRsHandle
         : m_hHandle(hHandle), m_grHandle(grHandle)
     {
     }
+
     ~HDF4GRsHandle()
     {
         CPLMutexHolderD(&hHDF4Mutex);
@@ -796,6 +795,7 @@ struct HDF4GRHandle
         : m_poGRsHandle(poGRsHandle), m_iGR(iGR)
     {
     }
+
     ~HDF4GRHandle()
     {
         CPLMutexHolderD(&hHDF4Mutex);
@@ -870,10 +870,7 @@ class HDF4GRArray final : public GDALPamMDArray
         return ar;
     }
 
-    bool IsWritable() const override
-    {
-        return false;
-    }
+    bool IsWritable() const override;
 
     const std::string &GetFilename() const override
     {
@@ -899,6 +896,11 @@ class HDF4GRArray final : public GDALPamMDArray
         return HDF4Group::Create(std::string(), "/", m_poShared);
     }
 };
+
+bool HDF4GRArray::IsWritable() const
+{
+    return false;
+}
 
 /************************************************************************/
 /*                            HDF4SDAttribute                           */
@@ -926,11 +928,13 @@ class HDF4SDAttribute final : public HDF4AbstractAttribute
     {
     }
 
-    void ReadData(void *pDstBuffer) const override
-    {
-        SDreadattr(m_sdHandle, m_iAttribute, pDstBuffer);
-    }
+    void ReadData(void *pDstBuffer) const override;
 };
+
+void HDF4SDAttribute::ReadData(void *pDstBuffer) const
+{
+    SDreadattr(m_sdHandle, m_iAttribute, pDstBuffer);
+}
 
 /************************************************************************/
 /*                           HDF4GRAttribute                            */
@@ -958,11 +962,13 @@ class HDF4GRAttribute final : public HDF4AbstractAttribute
     {
     }
 
-    void ReadData(void *pDstBuffer) const override
-    {
-        GRgetattr(m_grHandle, m_iAttribute, pDstBuffer);
-    }
+    void ReadData(void *pDstBuffer) const override;
 };
+
+void HDF4GRAttribute::ReadData(void *pDstBuffer) const
+{
+    GRgetattr(m_grHandle, m_iAttribute, pDstBuffer);
+}
 
 /************************************************************************/
 /*                         HDF4GRPalette                                */
@@ -990,16 +996,19 @@ class HDF4GRPalette final : public GDALAttribute
                   int32 nValues);
 
     const std::vector<std::shared_ptr<GDALDimension>> &
-    GetDimensions() const override
-    {
-        return m_dims;
-    }
+    GetDimensions() const override;
 
     const GDALExtendedDataType &GetDataType() const override
     {
         return m_dt;
     }
 };
+
+const std::vector<std::shared_ptr<GDALDimension>> &
+HDF4GRPalette::GetDimensions() const
+{
+    return m_dims;
+}
 
 /************************************************************************/
 /*                        HDF4SharedResources()                         */
@@ -1641,7 +1650,7 @@ static bool ReadPixels(const GUInt64 *arrayStartIdx, const size_t *count,
     /*      to look in to find the external files.  Normally this is the    */
     /*      directory holding the hdf file.                                 */
     /* -------------------------------------------------------------------- */
-    HXsetdir(CPLGetPath(poShared->GetFilename().c_str()));
+    HXsetdir(CPLGetPathSafe(poShared->GetFilename().c_str()).c_str());
 
     const size_t nDims(dims.size());
     std::vector<int32> sw_start(nDims);
@@ -2512,7 +2521,7 @@ HDF4SDSGroup::GetDimensions(CSLConstList) const
     std::string osTransformationMatrix;
     if (m_bIsGDALDataset)
     {
-        for (auto &poAttr : m_oGlobalAttributes)
+        for (const auto &poAttr : m_oGlobalAttributes)
         {
             if (poAttr->GetName() == "Projection" &&
                 poAttr->GetDataType().GetClass() == GEDTC_STRING)
@@ -2622,7 +2631,7 @@ HDF4SDSGroup::GetDimensions(CSLConstList) const
                         GetFullName(), "Band", std::string(), std::string(),
                         m_dims[2]->GetSize()));
             }
-            m_dims = newDims;
+            m_dims = std::move(newDims);
 
             m_varX = GDALMDArrayRegularlySpaced::Create(
                 GetFullName(), m_dims[1]->GetName(), m_dims[1],
@@ -2644,7 +2653,7 @@ HDF4SDSGroup::GetDimensions(CSLConstList) const
         if (poArray)
         {
             m_oSetIndexingVariables.push_back(poArray);
-            poDim->SetIndexingVariable(poArray);
+            poDim->SetIndexingVariable(std::move(poArray));
         }
     }
 
@@ -2812,7 +2821,7 @@ std::shared_ptr<OGRSpatialReference> HDF4SDSArray::GetSpatialRef() const
     if (m_bIsGDALDataset)
     {
         std::string osProjection;
-        for (auto &poAttr : m_oGlobalAttributes)
+        for (const auto &poAttr : m_oGlobalAttributes)
         {
             if (poAttr->GetName() == "Projection" &&
                 poAttr->GetDataType().GetClass() == GEDTC_STRING)
@@ -2884,7 +2893,7 @@ std::vector<std::string> HDF4GRsGroup::GetMDArrayNames(CSLConstList) const
         {
             osName.resize(strlen(osName.c_str()));
             m_oMapNameToGRIdx[osName] = i;
-            res.push_back(osName);
+            res.push_back(std::move(osName));
         }
 
         GRendaccess(iGR);
@@ -3048,7 +3057,7 @@ bool HDF4GRArray::IRead(const GUInt64 *arrayStartIdx, const size_t *count,
     /*      to look in to find the external files.  Normally this is the    */
     /*      directory holding the hdf file.                                 */
     /* -------------------------------------------------------------------- */
-    HXsetdir(CPLGetPath(m_poShared->GetFilename().c_str()));
+    HXsetdir(CPLGetPathSafe(m_poShared->GetFilename().c_str()).c_str());
 
     const size_t nDims(m_dims.size());
     std::vector<int32> sw_start(nDims);

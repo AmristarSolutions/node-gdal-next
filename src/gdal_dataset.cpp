@@ -41,6 +41,7 @@ void Dataset::Initialize(Local<Object> target) {
   ATTR(lcons, "layers", layersGetter, READ_ONLY_SETTER);
   ATTR_ASYNCABLE(lcons, "rasterSize", rasterSizeGetter, READ_ONLY_SETTER);
   ATTR(lcons, "driver", driverGetter, READ_ONLY_SETTER);
+  ATTR(lcons, "threadSafe", threadSafeGetter, READ_ONLY_SETTER);
   ATTR(lcons, "root", rootGetter, READ_ONLY_SETTER);
   ATTR_ASYNCABLE(lcons, "srs", srsGetter, srsSetter);
   ATTR_ASYNCABLE(lcons, "geoTransform", geoTransformGetter, geoTransformSetter);
@@ -100,7 +101,7 @@ NAN_METHOD(Dataset::New) {
     Local<Value> layers = DatasetLayers::New(info.This());
     Nan::SetPrivate(info.This(), Nan::New("layers_").ToLocalChecked(), layers);
 
-    Local<Value> rootObj, bandsObj;
+    Local<Value> bandsObj;
 #if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 1)
     GDALDataset *gdal_ds = f->get();
     std::shared_ptr<GDALGroup> root = gdal_ds->GetRootGroup();
@@ -125,7 +126,7 @@ NAN_METHOD(Dataset::New) {
   }
 }
 
-Local<Value> Dataset::New(GDALDataset *raw, GDALDataset *parent) {
+Local<Value> Dataset::New(GDALDataset *raw, GDALDataset *parent, bool close) {
   Nan::EscapableHandleScope scope;
 
   if (!raw) { return scope.Escape(Nan::Null()); }
@@ -145,7 +146,7 @@ Local<Value> Dataset::New(GDALDataset *raw, GDALDataset *parent) {
   Local<Object> obj =
     Nan::NewInstance(Nan::GetFunction(Nan::New(Dataset::constructor)).ToLocalChecked(), 1, &ext).ToLocalChecked();
 
-  wrapped->uid = object_store.add(raw, wrapped->persistent(), parent_uid);
+  wrapped->uid = object_store.add(raw, wrapped->persistent(), parent_uid, close);
 
   return scope.Escape(obj);
 }
@@ -545,9 +546,9 @@ NAN_METHOD(Dataset::setGCPs) {
   NODE_ARG_ARRAY(0, "gcps", gcps);
   NODE_ARG_OPT_STR(1, "projection", projection);
 
-  std::shared_ptr<GDAL_GCP> list(new GDAL_GCP[gcps->Length()], array_deleter<GDAL_GCP>());
-  std::shared_ptr<std::string> pszId_list(new std::string[gcps->Length()], array_deleter<std::string>());
-  std::shared_ptr<std::string> pszInfo_list(new std::string[gcps->Length()], array_deleter<std::string>());
+  std::shared_ptr<GDAL_GCP[]> list(new GDAL_GCP[gcps->Length()]);
+  std::shared_ptr<std::string[]> pszId_list(new std::string[gcps->Length()]);
+  std::shared_ptr<std::string[]> pszInfo_list(new std::string[gcps->Length()]);
   GDAL_GCP *gcp = list.get();
   for (unsigned int i = 0; i < gcps->Length(); ++i) {
     Local<Value> val = Nan::Get(gcps, i).ToLocalChecked();
@@ -630,9 +631,8 @@ GDAL_ASYNCABLE_DEFINE(Dataset::buildOverviews) {
   int n_overviews = overviews->Length();
   int i, n_bands = 0;
 
-  // shared_ptr to array is C++17 :(
-  std::shared_ptr<int> o(new int[n_overviews], array_deleter<int>());
-  std::shared_ptr<int> b;
+  std::shared_ptr<int[]> o(new int[n_overviews]);
+  std::shared_ptr<int[]> b;
   for (i = 0; i < n_overviews; i++) {
     Local<Value> val = Nan::Get(overviews, i).ToLocalChecked();
     if (!val->IsNumber()) {
@@ -644,7 +644,7 @@ GDAL_ASYNCABLE_DEFINE(Dataset::buildOverviews) {
 
   if (!bands.IsEmpty()) {
     n_bands = bands->Length();
-    b = std::shared_ptr<int>(new int[n_bands], array_deleter<int>());
+    b = std::shared_ptr<int[]>(new int[n_bands]);
     for (i = 0; i < n_bands; i++) {
       Local<Value> val = Nan::Get(bands, i).ToLocalChecked();
       if (!val->IsNumber()) {
@@ -880,17 +880,17 @@ GDAL_ASYNCABLE_GETTER_DEFINE(Dataset::geoTransformGetter) {
 
   GDALDataset *raw = ds->get();
 
-  GDALAsyncableJob<std::shared_ptr<double>> job(ds->uid);
+  GDALAsyncableJob<std::shared_ptr<double[]>> job(ds->uid);
 
   job.main = [raw](const GDALExecutionProgress &) {
-    auto transform = std::shared_ptr<double>(new double[6], array_deleter<double>());
+    auto transform = std::shared_ptr<double[]>(new double[6]);
     CPLErr err = raw->GetGeoTransform(transform.get());
     // This is mostly (always?) a sign that it has not been set
-    if (err) { return std::shared_ptr<double>(nullptr); }
+    if (err) { return std::shared_ptr<double[]>(nullptr); }
     return transform;
   };
 
-  job.rval = [](std::shared_ptr<double> transform, const GetFromPersistentFunc &) {
+  job.rval = [](std::shared_ptr<double[]> transform, const GetFromPersistentFunc &) {
     if (transform == nullptr) return Nan::Null().As<v8::Value>();
     Local<Array> result = Nan::New<Array>(6);
     Nan::Set(result, 0, Nan::New<Number>(transform.get()[0]));
@@ -924,6 +924,30 @@ NAN_GETTER(Dataset::driverGetter) {
 
   GDALDataset *raw = ds->get();
   if (raw->GetDriver() != nullptr) { info.GetReturnValue().Set(Driver::New(raw->GetDriver())); }
+}
+
+/**
+ * @readonly
+ * @kind member
+ * @name threadSafe
+ * @instance
+ * @memberof Dataset
+ * @type {boolean}
+ */
+NAN_GETTER(Dataset::threadSafeGetter) {
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 10)
+  Dataset *ds = Nan::ObjectWrap::Unwrap<Dataset>(info.This());
+
+  if (!ds->isAlive()) {
+    Nan::ThrowError("Dataset object has already been destroyed");
+    return;
+  }
+
+  GDALDataset *raw = ds->get();
+  if (raw->GetDriver() != nullptr) { info.GetReturnValue().Set(Nan::New<Boolean>(raw->IsThreadSafe(GDAL_OF_RASTER))); }
+#else
+  info.GetReturnValue().Set(Nan::New<Boolean>(false));
+#endif
 }
 
 NAN_SETTER(Dataset::srsSetter) {

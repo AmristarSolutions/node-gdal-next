@@ -9,23 +9,7 @@
  * Copyright (c) 2004, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2008-2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include <string>
@@ -52,8 +36,7 @@ inline void FreeResultAndNullify(MYSQL_RES *&hResult)
 /************************************************************************/
 
 OGRMySQLDataSource::OGRMySQLDataSource()
-    : papoLayers(nullptr), nLayers(0), pszName(nullptr), bDSUpdate(FALSE),
-      hConn(nullptr), nKnownSRID(0), panSRID(nullptr), papoSRS(nullptr),
+    : papoLayers(nullptr), nLayers(0), bDSUpdate(FALSE), hConn(nullptr),
       poLongResultLayer(nullptr)
 {
 }
@@ -67,8 +50,6 @@ OGRMySQLDataSource::~OGRMySQLDataSource()
 {
     InterruptLongResult();
 
-    CPLFree(pszName);
-
     for (int i = 0; i < nLayers; i++)
         delete papoLayers[i];
 
@@ -76,14 +57,6 @@ OGRMySQLDataSource::~OGRMySQLDataSource()
 
     if (hConn != nullptr)
         mysql_close(hConn);
-
-    for (int i = 0; i < nKnownSRID; i++)
-    {
-        if (papoSRS[i] != nullptr)
-            papoSRS[i]->Release();
-    }
-    CPLFree(panSRID);
-    CPLFree(papoSRS);
 }
 
 /************************************************************************/
@@ -217,7 +190,7 @@ int OGRMySQLDataSource::Open(const char *pszNewName, char **papszOpenOptionsIn,
         const char *pszTimeoutLength = CPLGetConfigOption("MYSQL_TIMEOUT", "0");
 
         unsigned int timeout = atoi(pszTimeoutLength);
-        mysql_options(hConn, MYSQL_OPT_CONNECT_TIMEOUT, (char *)&timeout);
+        mysql_options(hConn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
 
         mysql_options(hConn, MYSQL_SET_CHARSET_NAME, "utf8");
     }
@@ -244,6 +217,7 @@ int OGRMySQLDataSource::Open(const char *pszNewName, char **papszOpenOptionsIn,
         CSLDestroy(papszTableNames);
         return FALSE;
     }
+#if defined(LIBMYSQL_VERSION_ID) && (LIBMYSQL_VERSION_ID < 80034)
     else
     {
         // Enable automatic reconnection
@@ -256,8 +230,7 @@ int OGRMySQLDataSource::Open(const char *pszNewName, char **papszOpenOptionsIn,
         // and at any point on more recent versions.
         mysql_options(hConn, MYSQL_OPT_RECONNECT, &reconnect);
     }
-
-    pszName = CPLStrdup(pszNewName);
+#endif
 
     bDSUpdate = bUpdate;
 
@@ -366,7 +339,7 @@ int OGRMySQLDataSource::OpenTable(const char *pszNewName, int bUpdate)
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRMySQLDataSource::TestCapability(const char *pszCap)
+int OGRMySQLDataSource::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, ODsCCreateLayer))
@@ -387,7 +360,7 @@ int OGRMySQLDataSource::TestCapability(const char *pszCap)
 /*                              GetLayer()                              */
 /************************************************************************/
 
-OGRLayer *OGRMySQLDataSource::GetLayer(int iLayer)
+const OGRLayer *OGRMySQLDataSource::GetLayer(int iLayer) const
 
 {
     if (iLayer < 0 || iLayer >= nLayers)
@@ -557,7 +530,7 @@ OGRErr OGRMySQLDataSource::UpdateMetadataTables(const char *pszLayerName,
 /*      OGRSpatialReference, as handles may be cached.                  */
 /************************************************************************/
 
-OGRSpatialReference *OGRMySQLDataSource::FetchSRS(int nId)
+const OGRSpatialReference *OGRMySQLDataSource::FetchSRS(int nId)
 {
     if (nId < 0)
         return nullptr;
@@ -565,13 +538,11 @@ OGRSpatialReference *OGRMySQLDataSource::FetchSRS(int nId)
     /* -------------------------------------------------------------------- */
     /*      First, we look through our SRID cache, is it there?             */
     /* -------------------------------------------------------------------- */
-    for (int i = 0; i < nKnownSRID; i++)
+    auto oIter = m_oSRSCache.find(nId);
+    if (oIter != m_oSRSCache.end())
     {
-        if (panSRID[i] == nId)
-            return papoSRS[i];
+        return oIter->second.get();
     }
-
-    OGRSpatialReference *poSRS = nullptr;
 
     // make sure to attempt to free any old results
     MYSQL_RES *hResult = mysql_store_result(GetConn());
@@ -608,12 +579,12 @@ OGRSpatialReference *OGRMySQLDataSource::FetchSRS(int nId)
 
     FreeResultAndNullify(hResult);
 
-    poSRS = new OGRSpatialReference();
+    std::unique_ptr<OGRSpatialReference, OGRSpatialReferenceReleaser> poSRS(
+        new OGRSpatialReference());
     poSRS->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
     if (pszWKT == nullptr || poSRS->importFromWkt(pszWKT) != OGRERR_NONE)
     {
-        delete poSRS;
-        poSRS = nullptr;
+        poSRS.reset();
     }
 
     CPLFree(pszWKT);
@@ -635,14 +606,8 @@ OGRSpatialReference *OGRMySQLDataSource::FetchSRS(int nId)
     /* -------------------------------------------------------------------- */
     /*      Add to the cache.                                               */
     /* -------------------------------------------------------------------- */
-    panSRID = (int *)CPLRealloc(panSRID, sizeof(int) * (nKnownSRID + 1));
-    papoSRS = (OGRSpatialReference **)CPLRealloc(papoSRS, sizeof(void *) *
-                                                              (nKnownSRID + 1));
-    panSRID[nKnownSRID] = nId;
-    papoSRS[nKnownSRID] = poSRS;
-    nKnownSRID++;
-
-    return poSRS;
+    oIter = m_oSRSCache.emplace(nId, std::move(poSRS)).first;
+    return oIter->second.get();
 }
 
 /************************************************************************/
@@ -1001,8 +966,8 @@ OGRLayer *OGRMySQLDataSource::ExecuteSQL(const char *pszSQLCommand,
     /*      Use generic implementation for recognized dialects              */
     /* -------------------------------------------------------------------- */
     if (IsGenericSQLDialect(pszDialect))
-        return OGRDataSource::ExecuteSQL(pszSQLCommand, poSpatialFilter,
-                                         pszDialect);
+        return GDALDataset::ExecuteSQL(pszSQLCommand, poSpatialFilter,
+                                       pszDialect);
 
 /* -------------------------------------------------------------------- */
 /*      Special case DELLAYER: command.                                 */
@@ -1084,7 +1049,8 @@ char *OGRMySQLDataSource::LaunderName(const char *pszSrcName)
 
     for (int i = 0; pszSafeName[i] != '\0'; i++)
     {
-        pszSafeName[i] = (char)tolower(pszSafeName[i]);
+        pszSafeName[i] =
+            (char)CPLTolower(static_cast<unsigned char>(pszSafeName[i]));
         if (pszSafeName[i] == '-' || pszSafeName[i] == '#')
             pszSafeName[i] = '_';
     }
@@ -1172,10 +1138,10 @@ OGRErr OGRMySQLDataSource::DeleteLayer(int iLayer)
 /*                           ICreateLayer()                             */
 /************************************************************************/
 
-OGRLayer *OGRMySQLDataSource::ICreateLayer(const char *pszLayerNameIn,
-                                           const OGRSpatialReference *poSRS,
-                                           OGRwkbGeometryType eType,
-                                           char **papszOptions)
+OGRLayer *
+OGRMySQLDataSource::ICreateLayer(const char *pszLayerNameIn,
+                                 const OGRGeomFieldDefn *poGeomFieldDefn,
+                                 CSLConstList papszOptions)
 
 {
     MYSQL_RES *hResult = nullptr;
@@ -1189,6 +1155,10 @@ OGRLayer *OGRMySQLDataSource::ICreateLayer(const char *pszLayerNameIn,
     /*      Make sure there isn't an active transaction already.            */
     /* -------------------------------------------------------------------- */
     InterruptLongResult();
+
+    const auto eType = poGeomFieldDefn ? poGeomFieldDefn->GetType() : wkbNone;
+    const auto poSRS =
+        poGeomFieldDefn ? poGeomFieldDefn->GetSpatialRef() : nullptr;
 
     if (CPLFetchBool(papszOptions, "LAUNDER", true))
         pszLayerName = LaunderName(pszLayerNameIn);

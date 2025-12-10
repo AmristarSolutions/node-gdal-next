@@ -7,27 +7,11 @@
  ******************************************************************************
  * Copyright (c) 2012, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_ods.h"
-#include "ogr_mem.h"
+#include "memdataset.h"
 #include "ogr_p.h"
 #include "cpl_conv.h"
 #include "cpl_vsi_error.h"
@@ -112,6 +96,28 @@ OGRErr OGRODSLayer::SyncToDisk()
 }
 
 /************************************************************************/
+/*                      TranslateFIDFromMemLayer()                      */
+/************************************************************************/
+
+// Translate a FID from MEM convention (0-based) to ODS convention
+GIntBig OGRODSLayer::TranslateFIDFromMemLayer(GIntBig nFID) const
+{
+    return nFID + (1 + (bHasHeaderLine ? 1 : 0));
+}
+
+/************************************************************************/
+/*                        TranslateFIDToMemLayer()                      */
+/************************************************************************/
+
+// Translate a FID from ODS convention to MEM convention (0-based)
+GIntBig OGRODSLayer::TranslateFIDToMemLayer(GIntBig nFID) const
+{
+    if (nFID > 0)
+        return nFID - (1 + (bHasHeaderLine ? 1 : 0));
+    return OGRNullFID;
+}
+
+/************************************************************************/
 /*                          GetNextFeature()                            */
 /************************************************************************/
 
@@ -122,7 +128,7 @@ OGRFeature *OGRODSLayer::GetNextFeature()
         OGRFeature *poFeature = OGRMemLayer::GetNextFeature();
         if (poFeature == nullptr)
             return nullptr;
-        poFeature->SetFID(poFeature->GetFID() + 1 + (bHasHeaderLine ? 1 : 0));
+        poFeature->SetFID(TranslateFIDFromMemLayer(poFeature->GetFID()));
         if (m_poAttrQueryODS == nullptr ||
             m_poAttrQueryODS->Evaluate(poFeature))
         {
@@ -139,7 +145,7 @@ OGRFeature *OGRODSLayer::GetNextFeature()
 OGRFeature *OGRODSLayer::GetFeature(GIntBig nFeatureId)
 {
     OGRFeature *poFeature =
-        OGRMemLayer::GetFeature(nFeatureId - (1 + (bHasHeaderLine ? 1 : 0)));
+        OGRMemLayer::GetFeature(TranslateFIDToMemLayer(nFeatureId));
     if (poFeature)
         poFeature->SetFID(nFeatureId);
     return poFeature;
@@ -157,20 +163,74 @@ GIntBig OGRODSLayer::GetFeatureCount(int bForce)
 }
 
 /************************************************************************/
-/*                           ISetFeature()                               */
+/*                           ISetFeature()                              */
 /************************************************************************/
 
 OGRErr OGRODSLayer::ISetFeature(OGRFeature *poFeature)
 {
-    if (poFeature == nullptr)
-        return OGRMemLayer::ISetFeature(poFeature);
-
-    GIntBig nFID = poFeature->GetFID();
-    if (nFID != OGRNullFID)
-        poFeature->SetFID(nFID - (1 + (bHasHeaderLine ? 1 : 0)));
+    const GIntBig nFIDOrigin = poFeature->GetFID();
+    if (nFIDOrigin > 0)
+    {
+        const GIntBig nFIDMemLayer = TranslateFIDToMemLayer(nFIDOrigin);
+        if (!GetFeatureRef(nFIDMemLayer))
+            return OGRERR_NON_EXISTING_FEATURE;
+        poFeature->SetFID(nFIDMemLayer);
+    }
+    else
+    {
+        return OGRERR_NON_EXISTING_FEATURE;
+    }
     SetUpdated();
     OGRErr eErr = OGRMemLayer::ISetFeature(poFeature);
-    poFeature->SetFID(nFID);
+    poFeature->SetFID(nFIDOrigin);
+    return eErr;
+}
+
+/************************************************************************/
+/*                         IUpdateFeature()                             */
+/************************************************************************/
+
+OGRErr OGRODSLayer::IUpdateFeature(OGRFeature *poFeature,
+                                   int nUpdatedFieldsCount,
+                                   const int *panUpdatedFieldsIdx,
+                                   int nUpdatedGeomFieldsCount,
+                                   const int *panUpdatedGeomFieldsIdx,
+                                   bool bUpdateStyleString)
+{
+    const GIntBig nFIDOrigin = poFeature->GetFID();
+    if (nFIDOrigin != OGRNullFID)
+        poFeature->SetFID(TranslateFIDToMemLayer(nFIDOrigin));
+    SetUpdated();
+    OGRErr eErr = OGRMemLayer::IUpdateFeature(
+        poFeature, nUpdatedFieldsCount, panUpdatedFieldsIdx,
+        nUpdatedGeomFieldsCount, panUpdatedGeomFieldsIdx, bUpdateStyleString);
+    poFeature->SetFID(nFIDOrigin);
+    return eErr;
+}
+
+/************************************************************************/
+/*                          ICreateFeature()                            */
+/************************************************************************/
+
+OGRErr OGRODSLayer::ICreateFeature(OGRFeature *poFeature)
+{
+    const GIntBig nFIDOrigin = poFeature->GetFID();
+    if (nFIDOrigin > 0)
+    {
+        const GIntBig nFIDModified = TranslateFIDToMemLayer(nFIDOrigin);
+        if (GetFeatureRef(nFIDModified))
+        {
+            SetUpdated();
+            poFeature->SetFID(nFIDModified);
+            OGRErr eErr = OGRMemLayer::ISetFeature(poFeature);
+            poFeature->SetFID(nFIDOrigin);
+            return eErr;
+        }
+    }
+    SetUpdated();
+    poFeature->SetFID(OGRNullFID);
+    OGRErr eErr = OGRMemLayer::ICreateFeature(poFeature);
+    poFeature->SetFID(TranslateFIDFromMemLayer(poFeature->GetFID()));
     return eErr;
 }
 
@@ -181,7 +241,7 @@ OGRErr OGRODSLayer::ISetFeature(OGRFeature *poFeature)
 OGRErr OGRODSLayer::DeleteFeature(GIntBig nFID)
 {
     SetUpdated();
-    return OGRMemLayer::DeleteFeature(nFID - (1 + (bHasHeaderLine ? 1 : 0)));
+    return OGRMemLayer::DeleteFeature(TranslateFIDToMemLayer(nFID));
 }
 
 /************************************************************************/
@@ -203,12 +263,23 @@ OGRErr OGRODSLayer::SetAttributeFilter(const char *pszQuery)
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRODSLayer::TestCapability(const char *pszCap)
+int OGRODSLayer::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, OLCFastFeatureCount))
         return m_poFilterGeom == nullptr && m_poAttrQueryODS == nullptr;
+    else if (EQUAL(pszCap, OLCUpsertFeature))
+        return false;
     return OGRMemLayer::TestCapability(pszCap);
+}
+
+/************************************************************************/
+/*                             GetDataset()                             */
+/************************************************************************/
+
+GDALDataset *OGRODSLayer::GetDataset()
+{
+    return poDS;
 }
 
 /************************************************************************/
@@ -278,7 +349,7 @@ CPLErr OGRODSDataSource::Close()
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRODSDataSource::TestCapability(const char *pszCap)
+int OGRODSDataSource::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, ODsCCreateLayer))
@@ -301,10 +372,10 @@ int OGRODSDataSource::TestCapability(const char *pszCap)
 /*                              GetLayer()                              */
 /************************************************************************/
 
-OGRLayer *OGRODSDataSource::GetLayer(int iLayer)
+const OGRLayer *OGRODSDataSource::GetLayer(int iLayer) const
 
 {
-    AnalyseFile();
+    const_cast<OGRODSDataSource *>(this)->AnalyseFile();
     if (iLayer < 0 || iLayer >= nLayers)
         return nullptr;
 
@@ -315,9 +386,9 @@ OGRLayer *OGRODSDataSource::GetLayer(int iLayer)
 /*                            GetLayerCount()                           */
 /************************************************************************/
 
-int OGRODSDataSource::GetLayerCount()
+int OGRODSDataSource::GetLayerCount() const
 {
-    AnalyseFile();
+    const_cast<OGRODSDataSource *>(this)->AnalyseFile();
     return nLayers;
 }
 
@@ -745,8 +816,8 @@ static void ReserveAndLimitFieldCount(OGRLayer *poLayer,
                                       std::vector<std::string> &aosValues)
 {
     int nMaxCols = atoi(CPLGetConfigOption("OGR_ODS_MAX_FIELD_COUNT", "2000"));
-    // Arbitrary limit to please Coverity Scan that would complain about
-    // tainted_data to resize aosValues.
+    if (nMaxCols < 0)
+        nMaxCols = 0;
     constexpr int MAXCOLS_LIMIT = 1000000;
     if (nMaxCols > MAXCOLS_LIMIT)
         nMaxCols = MAXCOLS_LIMIT;
@@ -1165,8 +1236,9 @@ void OGRODSDataSource::endElementRow(
                         const OGRFieldType eValType = GetOGRFieldType(
                             apoCurLineValues[i].c_str(),
                             apoCurLineTypes[i].c_str(), eValSubType);
+                        OGRLayer *poCurLayerAsLayer = poCurLayer;
                         OGRFieldDefn *poFieldDefn =
-                            poCurLayer->GetLayerDefn()->GetFieldDefn(
+                            poCurLayerAsLayer->GetLayerDefn()->GetFieldDefn(
                                 static_cast<int>(i));
                         const OGRFieldType eFieldType = poFieldDefn->GetType();
                         if (eFieldType == OFTDateTime &&
@@ -1214,7 +1286,7 @@ void OGRODSDataSource::endElementRow(
                                  eValType == OFTInteger &&
                                  eValSubType != OFSTBoolean)
                         {
-                            poFieldDefn->SetSubType(OFSTNone);
+                            whileUnsealing(poFieldDefn)->SetSubType(OFSTNone);
                         }
                     }
                 }
@@ -1309,7 +1381,7 @@ void OGRODSDataSource::AnalyseFile()
         nDataHandlerCounter = 0;
         unsigned int nLen = static_cast<unsigned int>(
             VSIFReadL(aBuf.data(), 1, aBuf.size(), fpContent));
-        nDone = VSIFEofL(fpContent);
+        nDone = (nLen < aBuf.size());
         if (XML_Parse(oParser, aBuf.data(), nLen, nDone) == XML_STATUS_ERROR)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
@@ -1492,7 +1564,7 @@ void OGRODSDataSource::AnalyseSettings()
         nDataHandlerCounter = 0;
         unsigned int nLen =
             (unsigned int)VSIFReadL(aBuf.data(), 1, aBuf.size(), fpSettings);
-        nDone = VSIFEofL(fpSettings);
+        nDone = (nLen < aBuf.size());
         if (XML_Parse(oParser, aBuf.data(), nLen, nDone) == XML_STATUS_ERROR)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
@@ -1524,9 +1596,10 @@ void OGRODSDataSource::AnalyseSettings()
 /*                           ICreateLayer()                             */
 /************************************************************************/
 
-OGRLayer *OGRODSDataSource::ICreateLayer(
-    const char *pszLayerName, const OGRSpatialReference * /* poSRS */,
-    OGRwkbGeometryType /* eType */, char **papszOptions)
+OGRLayer *
+OGRODSDataSource::ICreateLayer(const char *pszLayerName,
+                               const OGRGeomFieldDefn * /*poGeomFieldDefn*/,
+                               CSLConstList papszOptions)
 {
     /* -------------------------------------------------------------------- */
     /*      Verify we are in update mode.                                   */
@@ -2329,8 +2402,7 @@ int ODSCellEvaluator::EvaluateRange(int nRow1, int nCol1, int nRow2, int nCol2,
 
 int ODSCellEvaluator::Evaluate(int nRow, int nCol)
 {
-    if (oVisisitedCells.find(std::pair<int, int>(nRow, nCol)) !=
-        oVisisitedCells.end())
+    if (oVisisitedCells.find(std::pair(nRow, nCol)) != oVisisitedCells.end())
     {
         CPLError(CE_Failure, CPLE_AppDefined,
                  "Circular dependency with (row=%d, col=%d)", nRow + 1,
@@ -2338,7 +2410,7 @@ int ODSCellEvaluator::Evaluate(int nRow, int nCol)
         return FALSE;
     }
 
-    oVisisitedCells.insert(std::pair<int, int>(nRow, nCol));
+    oVisisitedCells.insert(std::pair(nRow, nCol));
 
     if (poLayer->SetNextByIndex(nRow) != OGRERR_NONE)
     {

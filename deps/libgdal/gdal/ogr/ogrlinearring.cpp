@@ -8,23 +8,7 @@
  * Copyright (c) 1999, Frank Warmerdam
  * Copyright (c) 2008-2014, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
@@ -41,32 +25,14 @@
 #include "ogr_p.h"
 
 /************************************************************************/
-/*                           OGRLinearRing()                            */
-/************************************************************************/
-
-/** Constructor */
-OGRLinearRing::OGRLinearRing() = default;
-
-/************************************************************************/
 /*                  OGRLinearRing( const OGRLinearRing& )               */
 /************************************************************************/
 
 /**
  * \brief Copy constructor.
- *
- * Note: before GDAL 2.1, only the default implementation of the constructor
- * existed, which could be unsafe to use.
- *
- * @since GDAL 2.1
  */
 
 OGRLinearRing::OGRLinearRing(const OGRLinearRing &) = default;
-
-/************************************************************************/
-/*                          ~OGRLinearRing()                            */
-/************************************************************************/
-
-OGRLinearRing::~OGRLinearRing() = default;
 
 /************************************************************************/
 /*                           OGRLinearRing()                            */
@@ -75,7 +41,7 @@ OGRLinearRing::~OGRLinearRing() = default;
 /** Constructor
  * @param poSrcRing source ring.
  */
-OGRLinearRing::OGRLinearRing(OGRLinearRing *poSrcRing)
+OGRLinearRing::OGRLinearRing(const OGRLinearRing *poSrcRing)
 
 {
     if (poSrcRing == nullptr)
@@ -104,11 +70,6 @@ OGRLinearRing::OGRLinearRing(OGRLinearRing *poSrcRing)
 
 /**
  * \brief Assignment operator.
- *
- * Note: before GDAL 2.1, only the default implementation of the operator
- * existed, which could be unsafe to use.
- *
- * @since GDAL 2.1
  */
 
 OGRLinearRing &OGRLinearRing::operator=(const OGRLinearRing &other)
@@ -163,9 +124,8 @@ OGRErr OGRLinearRing::importFromWkb(const unsigned char * /*pabyData*/,
 /*      Disable method for this class.                                  */
 /************************************************************************/
 
-OGRErr OGRLinearRing::exportToWkb(CPL_UNUSED OGRwkbByteOrder eByteOrder,
-                                  CPL_UNUSED unsigned char *pabyData,
-                                  CPL_UNUSED OGRwkbVariant eWkbVariant) const
+OGRErr OGRLinearRing::exportToWkb(CPL_UNUSED unsigned char *pabyData,
+                                  CPL_UNUSED const OGRwkbExportOptions *) const
 
 {
     return OGRERR_UNSUPPORTED_OPERATION;
@@ -307,8 +267,8 @@ OGRErr OGRLinearRing::_importFromWkb(OGRwkbByteOrder eByteOrder, int _flags,
 /*      exportToWkb() METHOD.                                           */
 /************************************************************************/
 
-OGRErr OGRLinearRing::_exportToWkb(OGRwkbByteOrder eByteOrder, int _flags,
-                                   unsigned char *pabyData) const
+OGRErr OGRLinearRing::_exportToWkb(int _flags, unsigned char *pabyData,
+                                   const OGRwkbExportOptions *psOptions) const
 
 {
 
@@ -337,6 +297,14 @@ OGRErr OGRLinearRing::_exportToWkb(OGRwkbByteOrder eByteOrder, int _flags,
             else
                 memcpy(pabyData + 4 + i * 32 + 24, padfM + i, 8);
         }
+        OGRRoundCoordinatesIEEE754XYValues<32>(
+            psOptions->sPrecision.nXYBitPrecision, pabyData + 4, nPointCount);
+        OGRRoundCoordinatesIEEE754<32>(psOptions->sPrecision.nZBitPrecision,
+                                       pabyData + 4 + 2 * sizeof(uint64_t),
+                                       nPointCount);
+        OGRRoundCoordinatesIEEE754<32>(psOptions->sPrecision.nMBitPrecision,
+                                       pabyData + 4 + 3 * sizeof(uint64_t),
+                                       nPointCount);
     }
     else if (_flags & OGR_G_MEASURED)
     {
@@ -350,6 +318,11 @@ OGRErr OGRLinearRing::_exportToWkb(OGRwkbByteOrder eByteOrder, int _flags,
             else
                 memcpy(pabyData + 4 + i * 24 + 16, padfM + i, 8);
         }
+        OGRRoundCoordinatesIEEE754XYValues<24>(
+            psOptions->sPrecision.nXYBitPrecision, pabyData + 4, nPointCount);
+        OGRRoundCoordinatesIEEE754<24>(psOptions->sPrecision.nMBitPrecision,
+                                       pabyData + 4 + 2 * sizeof(uint64_t),
+                                       nPointCount);
     }
     else if (_flags & OGR_G_3D)
     {
@@ -363,17 +336,24 @@ OGRErr OGRLinearRing::_exportToWkb(OGRwkbByteOrder eByteOrder, int _flags,
             else
                 memcpy(pabyData + 4 + i * 24 + 16, padfZ + i, 8);
         }
+        OGRRoundCoordinatesIEEE754XYValues<24>(
+            psOptions->sPrecision.nXYBitPrecision, pabyData + 4, nPointCount);
+        OGRRoundCoordinatesIEEE754<24>(psOptions->sPrecision.nZBitPrecision,
+                                       pabyData + 4 + 2 * sizeof(uint64_t),
+                                       nPointCount);
     }
     else
     {
         nWords = 2 * static_cast<size_t>(nPointCount);
         memcpy(pabyData + 4, paoPoints, 16 * static_cast<size_t>(nPointCount));
+        OGRRoundCoordinatesIEEE754XYValues<16>(
+            psOptions->sPrecision.nXYBitPrecision, pabyData + 4, nPointCount);
     }
 
     /* -------------------------------------------------------------------- */
     /*      Swap if needed.                                                 */
     /* -------------------------------------------------------------------- */
-    if (OGR_SWAP(eByteOrder))
+    if (OGR_SWAP(psOptions->eByteOrder))
     {
         const int nCount = CPL_SWAP32(nPointCount);
         memcpy(pabyData, &nCount, 4);
@@ -403,6 +383,7 @@ size_t OGRLinearRing::_WkbSize(int _flags) const
     else
         return 4 + 16 * static_cast<size_t>(nPointCount);
 }
+
 //! @endcond
 
 /************************************************************************/
@@ -428,23 +409,16 @@ OGRLinearRing *OGRLinearRing::clone() const
 /*                             reverseWindingOrder()                    */
 /************************************************************************/
 
+//! @cond Doxygen_Suppress
 /** Reverse order of points.
  */
 void OGRLinearRing::reverseWindingOrder()
 
 {
-    OGRPoint pointA;
-    OGRPoint pointB;
-
-    for (int i = 0; i < nPointCount / 2; i++)
-    {
-        getPoint(i, &pointA);
-        const int pos = nPointCount - i - 1;
-        getPoint(pos, &pointB);
-        setPoint(i, &pointB);
-        setPoint(pos, &pointA);
-    }
+    reversePoints();
 }
+
+//! @endcond
 
 /************************************************************************/
 /*                             closeRing()                              */
@@ -704,4 +678,5 @@ OGRCurveCasterToLinearRing OGRLinearRing::GetCasterToLinearRing() const
 {
     return ::CasterToLinearRing;
 }
+
 //! @endcond

@@ -48,6 +48,9 @@ void Utils::Initialize(Local<Object> target) {
 
 /**
  * Library version of gdal_translate.
+ * Remember that all library version tools return a live opened
+ * dataset. If you need to use the file immediately following an
+ * operation, you should flush/close it.
  * @async
  *
  * @example
@@ -212,8 +215,8 @@ GDAL_ASYNCABLE_DEFINE(Utils::vectorTranslate) {
  * Library version of gdalinfo.
  *
  * @example
- * const ds = gdal.open('input.tif')
- * const output = gdal.info('/vsimem/temp.tif')
+ * const output = gdal.info(gdal.open('input.tif'))
+ * const output = gdal.info(gdal.open('/vsimem/temp.tif'), ['-json'])
  *
  * @throws {Error}
  * @method info
@@ -339,7 +342,7 @@ GDAL_ASYNCABLE_DEFINE(Utils::warp) {
     Nan::ThrowError("\"src_ds\" must contain at least one element");
     return;
   }
-  auto gdal_src_ds = std::shared_ptr<GDALDatasetH>(new GDALDatasetH[src_ds->Length()], array_deleter<GDALDatasetH>());
+  auto gdal_src_ds = std::shared_ptr<GDALDatasetH[]>(new GDALDatasetH[src_ds->Length()]);
   for (unsigned i = 0; i < src_ds->Length(); ++i) {
     NODE_UNWRAP_CHECK(Dataset, Nan::Get(src_ds, i).ToLocalChecked().As<Object>(), ds);
     GDAL_RAW_CHECK(GDALDataset *, ds, raw);
@@ -437,7 +440,6 @@ GDAL_ASYNCABLE_DEFINE(Utils::buildvrt) {
   std::vector<long> uids;
 
   std::string dst_path("");
-  Local<Object> dst_ds;
 
   NODE_ARG_STR(0, "dst_path", dst_path);
 
@@ -449,7 +451,7 @@ GDAL_ASYNCABLE_DEFINE(Utils::buildvrt) {
   }
 
   std::shared_ptr<CPLStringList> aosSrcDs = nullptr;
-  std::shared_ptr<GDALDatasetH> gdalSrcDs = nullptr;
+  std::shared_ptr<GDALDatasetH[]> gdalSrcDs = nullptr;
   if (Nan::Get(src_ds, 0).ToLocalChecked()->IsString()) {
     aosSrcDs = std::make_shared<CPLStringList>();
     for (unsigned i = 0; i < src_ds->Length(); ++i) {
@@ -461,7 +463,7 @@ GDAL_ASYNCABLE_DEFINE(Utils::buildvrt) {
     }
     uids.push_back(0);
   } else {
-    gdalSrcDs = std::shared_ptr<GDALDatasetH>(new GDALDatasetH[src_ds->Length()], array_deleter<GDALDatasetH>());
+    gdalSrcDs = std::shared_ptr<GDALDatasetH[]>(new GDALDatasetH[src_ds->Length()]);
     for (unsigned i = 0; i < src_ds->Length(); ++i) {
       Local<Value> v = Nan::Get(src_ds, i).ToLocalChecked();
       NODE_UNWRAP_CHECK(Dataset, v, ds);

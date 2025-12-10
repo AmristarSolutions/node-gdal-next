@@ -8,27 +8,12 @@
  * Copyright (c) 2009, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2009-2018, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
 #include "hdf5dataset.h"
+#include "hdf5drivercore.h"
 #include "gh5_convenience.h"
 
 #include "cpl_mem_cache.h"
@@ -43,8 +28,14 @@
 #include "ogr_core.h"
 #include "ogr_spatialref.h"
 #include "ogrsf_frmts.h"
+#include "rat.h"
+
+#ifdef EMBED_RESOURCE_FILES
+#include "embedded_resources.h"
+#endif
 
 #include <cassert>
+#include <cmath>
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -121,7 +112,7 @@ class BAGDataset final : public GDALPamDataset
     std::unique_ptr<OGRLayer> m_poTrackingListLayer{};
 
     OGRSpatialReference m_oSRS{};
-    double adfGeoTransform[6] = {0, 1, 0, 0, 0, 1};
+    GDALGeoTransform m_gt{};
 
     int m_nLowResWidth = 0;
     int m_nLowResHeight = 0;
@@ -154,9 +145,9 @@ class BAGDataset final : public GDALPamDataset
     hid_t m_hVarresMetadataDataType = -1;
     hid_t m_hVarresMetadataDataspace = -1;
     hid_t m_hVarresMetadataNative = -1;
-    std::map<int, BAGRefinementGrid> m_oMapRefinemendGrids;
+    std::map<int, BAGRefinementGrid> m_oMapRefinemendGrids{};
 
-    CPLStringList m_aosSubdatasets;
+    CPLStringList m_aosSubdatasets{};
 
     hid_t m_hVarresRefinements = -1;
     hid_t m_hVarresRefinementsDataType = -1;
@@ -166,7 +157,7 @@ class BAGDataset final : public GDALPamDataset
 
     unsigned m_nSuperGridRefinementStartIndex = 0;
 
-    lru11::Cache<unsigned, std::vector<float>> m_oCacheRefinementValues;
+    lru11::Cache<unsigned, std::vector<float>> m_oCacheRefinementValues{};
     const float *GetRefinementValues(unsigned nRefinementIndex);
 
     bool GetMeanSupergridsResolution(double &dfResX, double &dfResY);
@@ -181,7 +172,7 @@ class BAGDataset final : public GDALPamDataset
     bool WriteMetadataIfNeeded();
 
     bool OpenRaster(GDALOpenInfo *poOpenInfo, const CPLString &osFilename,
-                    bool bOpenSuperGrid, int nX, int nY,
+                    bool bOpenSuperGrid, int nX, int nY, bool bIsSubdataset,
                     const CPLString &osGeorefMetadataLayer,
                     CPLString &outOsSubDsName);
     bool OpenVector();
@@ -191,32 +182,34 @@ class BAGDataset final : public GDALPamDataset
         return m_poSharedResources->m_hHDF5;
     }
 
+    CPL_DISALLOW_COPY_ASSIGN(BAGDataset)
+
   public:
     BAGDataset();
     BAGDataset(BAGDataset *poParentDS, int nOvrFactor);
     BAGDataset(BAGDataset *poParentDS, int nXSize, int nYSize);
-    virtual ~BAGDataset();
+    ~BAGDataset() override;
 
-    virtual CPLErr GetGeoTransform(double *) override;
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
     const OGRSpatialReference *GetSpatialRef() const override;
 
-    CPLErr SetGeoTransform(double *padfGeoTransform) override;
+    CPLErr SetGeoTransform(const GDALGeoTransform &gt) override;
     CPLErr SetSpatialRef(const OGRSpatialReference *poSRS) override;
 
-    virtual char **GetMetadataDomainList() override;
-    virtual char **GetMetadata(const char *pszDomain = "") override;
+    char **GetMetadataDomainList() override;
+    char **GetMetadata(const char *pszDomain = "") override;
 
-    int GetLayerCount() override
+    int GetLayerCount() const override
     {
         return m_poTrackingListLayer ? 1 : 0;
     }
-    OGRLayer *GetLayer(int idx) override;
+
+    const OGRLayer *GetLayer(int idx) const override;
 
     static GDALDataset *Open(GDALOpenInfo *);
     static GDALDataset *OpenForCreate(GDALOpenInfo *, int nXSizeIn,
                                       int nYSizeIn, int nBandsIn,
                                       CSLConstList papszCreationOptions);
-    static int Identify(GDALOpenInfo *);
     static GDALDataset *CreateCopy(const char *pszFilename,
                                    GDALDataset *poSrcDS, int bStrict,
                                    char **papszOptions,
@@ -252,7 +245,7 @@ class BAGCreator
 
     static bool SubstituteVariables(CPLXMLNode *psNode, char **papszDict);
     static CPLString GenerateMetadata(int nXSize, int nYSize,
-                                      const double *padfGeoTransform,
+                                      const GDALGeoTransform &gt,
                                       const OGRSpatialReference *poSRS,
                                       char **papszOptions);
     static bool CreateAndWriteMetadata(hid_t hdf5,
@@ -291,17 +284,17 @@ class BAGRasterBand final : public GDALPamRasterBand
 
   public:
     BAGRasterBand(BAGDataset *, int);
-    virtual ~BAGRasterBand();
+    ~BAGRasterBand() override;
 
     bool Initialize(hid_t hDataset, const char *pszName);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual CPLErr IWriteBlock(int, int, void *) override;
-    virtual double GetNoDataValue(int *) override;
-    virtual CPLErr SetNoDataValue(double dfNoData) override;
+    CPLErr IReadBlock(int, int, void *) override;
+    CPLErr IWriteBlock(int, int, void *) override;
+    double GetNoDataValue(int *) override;
+    CPLErr SetNoDataValue(double dfNoData) override;
 
-    virtual double GetMinimum(int *pbSuccess = nullptr) override;
-    virtual double GetMaximum(int *pbSuccess = nullptr) override;
+    double GetMinimum(int *pbSuccess = nullptr) override;
+    double GetMaximum(int *pbSuccess = nullptr) override;
 };
 
 /************************************************************************/
@@ -313,13 +306,12 @@ class BAGRasterBand final : public GDALPamRasterBand
 class BAGBaseBand CPL_NON_FINAL : public GDALRasterBand
 {
   protected:
+    BAGBaseBand() = default;
+
     bool m_bHasNoData = false;
     float m_fNoDataValue = std::numeric_limits<float>::quiet_NaN();
 
   public:
-    BAGBaseBand() = default;
-    ~BAGBaseBand() = default;
-
     double GetNoDataValue(int *) override;
 
     int GetOverviewCount() override;
@@ -376,7 +368,7 @@ class BAGSuperGridBand final : public BAGBaseBand
 
   public:
     BAGSuperGridBand(BAGDataset *, int, bool bHasNoData, float fNoDataValue);
-    virtual ~BAGSuperGridBand();
+    ~BAGSuperGridBand() override;
 
     CPLErr IReadBlock(int, int, void *) override;
 };
@@ -398,7 +390,7 @@ class BAGResampledBand final : public BAGBaseBand
   public:
     BAGResampledBand(BAGDataset *, int nBandIn, bool bHasNoData,
                      float fNoDataValue, bool bInitializeMinMax);
-    virtual ~BAGResampledBand();
+    ~BAGResampledBand() override;
 
     void InitializeMinMax();
 
@@ -434,7 +426,7 @@ class BAGInterpolatedBand final : public BAGBaseBand
   public:
     BAGInterpolatedBand(BAGDataset *, int nBandIn, bool bHasNoData,
                         float fNoDataValue, bool bInitializeMinMax);
-    virtual ~BAGInterpolatedBand();
+    ~BAGInterpolatedBand() override;
 
     void InitializeMinMax();
 
@@ -502,6 +494,12 @@ bool BAGRasterBand::Initialize(hid_t hDatasetIDIn, const char *pszName)
 
         H5Sget_simple_extent_dims(m_hDataspace, dims, maxdims);
 
+        if (dims[0] > INT_MAX || dims[1] > INT_MAX)
+        {
+            CPLError(CE_Failure, CPLE_NotSupported,
+                     "At least one dimension size exceeds INT_MAX !");
+            return false;
+        }
         nRasterXSize = static_cast<int>(dims[1]);
         nRasterYSize = static_cast<int>(dims[0]);
     }
@@ -790,7 +788,8 @@ CPLErr BAGRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
         static_cast<H5OFFSET_TYPE>(nXOff)};
 
     const int nSizeOfData = static_cast<int>(H5Tget_size(m_hNative));
-    memset(pImage, 0, nBlockXSize * nBlockYSize * nSizeOfData);
+    memset(pImage, 0,
+           static_cast<size_t>(nBlockXSize) * nBlockYSize * nSizeOfData);
 
     //  Blocksize may not be a multiple of imagesize.
     hsize_t count[3] = {
@@ -912,8 +911,8 @@ CPLErr BAGRasterBand::IWriteBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     const int nLinesToFlip = static_cast<int>(count[0]);
     const int nSizeOfData = static_cast<int>(H5Tget_size(m_hNative));
     const int nLineSize = nSizeOfData * nBlockXSize;
-    GByte *const pabyTemp =
-        static_cast<GByte *>(CPLMalloc(nLineSize * nLinesToFlip));
+    GByte *const pabyTemp = static_cast<GByte *>(
+        CPLMalloc(static_cast<size_t>(nLineSize) * nLinesToFlip));
     GByte *const pbyImage = static_cast<GByte *>(pImage);
 
     for (int iY = 0; iY < nLinesToFlip; iY++)
@@ -1212,17 +1211,18 @@ CPLErr BAGResampledBand::IReadBlock(int nBlockXOff, int nBlockYOff,
     if (poGDS->m_bMask)
     {
         CPLAssert(pImage);  // to make CLang Static Analyzer happy
-        memset(pImage, 0, nBlockXSize * nBlockYSize);
+        memset(pImage, 0, static_cast<size_t>(nBlockXSize) * nBlockYSize);
     }
     else if (poGDS->m_ePopulation == BAGDataset::Population::MEAN)
     {
-        counts.resize(nBlockXSize * nBlockYSize);
+        counts.resize(static_cast<size_t>(nBlockXSize) * nBlockYSize);
     }
     else if (poGDS->m_ePopulation == BAGDataset::Population::COUNT)
     {
         CPLAssert(pImage);  // to make CLang Static Analyzer happy
         memset(pImage, 0,
-               nBlockXSize * nBlockYSize * GDALGetDataTypeSizeBytes(eDataType));
+               static_cast<size_t>(nBlockXSize) * nBlockYSize *
+                   GDALGetDataTypeSizeBytes(eDataType));
     }
 
     const int nReqCountX =
@@ -1230,12 +1230,12 @@ CPLErr BAGResampledBand::IReadBlock(int nBlockXOff, int nBlockYOff,
     const int nReqCountY =
         std::min(nBlockYSize, nRasterYSize - nBlockYOff * nBlockYSize);
     // Compute extent of block in georeferenced coordinates
-    double dfBlockMinX = poGDS->adfGeoTransform[0] +
-                         nBlockXOff * nBlockXSize * poGDS->adfGeoTransform[1];
-    double dfBlockMaxX = dfBlockMinX + nReqCountX * poGDS->adfGeoTransform[1];
-    double dfBlockMaxY = poGDS->adfGeoTransform[3] +
-                         nBlockYOff * nBlockYSize * poGDS->adfGeoTransform[5];
-    double dfBlockMinY = dfBlockMaxY + nReqCountY * poGDS->adfGeoTransform[5];
+    double dfBlockMinX =
+        poGDS->m_gt[0] + nBlockXOff * nBlockXSize * poGDS->m_gt[1];
+    double dfBlockMaxX = dfBlockMinX + nReqCountX * poGDS->m_gt[1];
+    double dfBlockMaxY =
+        poGDS->m_gt[3] + nBlockYOff * nBlockYSize * poGDS->m_gt[5];
+    double dfBlockMinY = dfBlockMaxY + nReqCountY * poGDS->m_gt[5];
 
     // Compute min/max indices of intersecting supergrids (origin bottom-left)
     const double dfLowResResX =
@@ -1276,7 +1276,8 @@ CPLErr BAGResampledBand::IReadBlock(int nBlockXOff, int nBlockYOff,
         return CE_Failure;
     }
 
-    std::vector<BAGRefinementGrid> rgrids(nCountLowResY * nCountLowResX);
+    std::vector<BAGRefinementGrid> rgrids(static_cast<size_t>(nCountLowResY) *
+                                          nCountLowResX);
     if (!(poGDS->ReadVarresMetadataValue(nLowResMinIdxY, nLowResMinIdxX,
                                          memspaceVarresMD, rgrids.data(),
                                          nCountLowResY, nCountLowResX)))
@@ -1313,10 +1314,12 @@ CPLErr BAGResampledBand::IReadBlock(int nBlockXOff, int nBlockYOff,
             // Super grid bounding box with pixel-center convention
             const double dfMinX =
                 poGDS->m_dfLowResMinX + x * dfLowResResX + rgrid.fSWX;
-            const double dfMaxX = dfMinX + (rgrid.nWidth - 1) * rgrid.fResX;
+            const double dfMaxX =
+                dfMinX + (rgrid.nWidth - 1) * static_cast<double>(rgrid.fResX);
             const double dfMinY =
                 poGDS->m_dfLowResMinY + y * dfLowResResY + rgrid.fSWY;
-            const double dfMaxY = dfMinY + (rgrid.nHeight - 1) * rgrid.fResY;
+            const double dfMaxY =
+                dfMinY + (rgrid.nHeight - 1) * static_cast<double>(rgrid.fResY);
 
             // Intersection of super grid with block
             const double dfInterMinX = std::max(dfBlockMinX, dfMinX);
@@ -1344,15 +1347,15 @@ CPLErr BAGResampledBand::IReadBlock(int nBlockXOff, int nBlockYOff,
                 "y = %d, x = %d, minx = %d, miny = %d, maxx = %d, maxy = %d", y,
                 x, nMinSrcX, nMinSrcY, nMaxSrcX, nMaxSrcY);
 #endif
-            const double dfCstX =
-                (dfMinX - dfBlockMinX) / poGDS->adfGeoTransform[1];
-            const double dfMulX = rgrid.fResX / poGDS->adfGeoTransform[1];
+            const double dfCstX = (dfMinX - dfBlockMinX) / poGDS->m_gt[1];
+            const double dfMulX = rgrid.fResX / poGDS->m_gt[1];
 
             for (int super_y = nMinSrcY; super_y <= nMaxSrcY; super_y++)
             {
-                const double dfSrcY = dfMinY + super_y * rgrid.fResY;
-                const int nTargetY = static_cast<int>(std::floor(
-                    (dfBlockMaxY - dfSrcY) / -poGDS->adfGeoTransform[5]));
+                const double dfSrcY =
+                    dfMinY + super_y * static_cast<double>(rgrid.fResY);
+                const int nTargetY = static_cast<int>(
+                    std::floor((dfBlockMaxY - dfSrcY) / -poGDS->m_gt[5]));
                 if (!(nTargetY >= 0 && nTargetY < nReqCountY))
                 {
                     continue;
@@ -1367,7 +1370,7 @@ CPLErr BAGResampledBand::IReadBlock(int nBlockXOff, int nBlockYOff,
                     /*
                     const double dfSrcX = dfMinX + super_x * rgrid.fResX;
                     const int nTargetX = static_cast<int>(std::floor(
-                        (dfSrcX - dfBlockMinX) / poGDS->adfGeoTransform[1]));
+                        (dfSrcX - dfBlockMinX) / poGDS->m_gt[1]));
                     */
                     const int nTargetX =
                         static_cast<int>(std::floor(dfCstX + super_x * dfMulX));
@@ -1660,15 +1663,11 @@ CPLErr BAGInterpolatedBand::IReadBlock(int nBlockXOff, int nBlockYOff,
         std::min(nBlockYSize, nRasterYSize - nBlockYOff * nBlockYSize);
     // Compute extent of block in georeferenced coordinates
     const double dfBlockMinX =
-        poGDS->adfGeoTransform[0] +
-        nBlockXOff * nBlockXSize * poGDS->adfGeoTransform[1];
-    const double dfBlockMaxX =
-        dfBlockMinX + nReqCountX * poGDS->adfGeoTransform[1];
+        poGDS->m_gt[0] + nBlockXOff * nBlockXSize * poGDS->m_gt[1];
+    const double dfBlockMaxX = dfBlockMinX + nReqCountX * poGDS->m_gt[1];
     const double dfBlockMaxY =
-        poGDS->adfGeoTransform[3] +
-        nBlockYOff * nBlockYSize * poGDS->adfGeoTransform[5];
-    const double dfBlockMinY =
-        dfBlockMaxY + nReqCountY * poGDS->adfGeoTransform[5];
+        poGDS->m_gt[3] + nBlockYOff * nBlockYSize * poGDS->m_gt[5];
+    const double dfBlockMinY = dfBlockMaxY + nReqCountY * poGDS->m_gt[5];
 
     // Compute min/max indices of intersecting supergrids (origin bottom-left)
     // We add a margin of (dfLowResResX, dfLowResResY) to be able to
@@ -1722,7 +1721,8 @@ CPLErr BAGInterpolatedBand::IReadBlock(int nBlockXOff, int nBlockYOff,
         return CE_Failure;
     }
 
-    std::vector<BAGRefinementGrid> rgrids(nCountLowResY * nCountLowResX);
+    std::vector<BAGRefinementGrid> rgrids(static_cast<size_t>(nCountLowResY) *
+                                          nCountLowResX);
     if (!(poGDS->ReadVarresMetadataValue(nLowResMinIdxY, nLowResMinIdxX,
                                          memspaceVarresMD, rgrids.data(),
                                          nCountLowResY, nCountLowResX)))
@@ -1759,7 +1759,7 @@ CPLErr BAGInterpolatedBand::IReadBlock(int nBlockXOff, int nBlockYOff,
     for (int y = 0; y < nReqCountY; ++y)
     {
         // Y georeference ordinate of the center of the cell to interpolate
-        const double dfY = dfBlockMaxY + (y + 0.5) * poGDS->adfGeoTransform[5];
+        const double dfY = dfBlockMaxY + (y + 0.5) * poGDS->m_gt[5];
         // Y index of the corresponding refinement grid
         const int iYRefinedGrid =
             static_cast<int>(floor((dfY - dfLowResMinY) / dfLowResResY));
@@ -1768,8 +1768,7 @@ CPLErr BAGInterpolatedBand::IReadBlock(int nBlockXOff, int nBlockYOff,
         for (int x = 0; x < nReqCountX; ++x)
         {
             // X georeference ordinate of the center of the cell to interpolate
-            const double dfX =
-                dfBlockMinX + (x + 0.5) * poGDS->adfGeoTransform[1];
+            const double dfX = dfBlockMinX + (x + 0.5) * poGDS->m_gt[1];
             // X index of the corresponding refinement grid
             const int iXRefinedGrid =
                 static_cast<int>((dfX - dfLowResMinX) / dfLowResResX);
@@ -2059,9 +2058,8 @@ CPLErr BAGInterpolatedBand::IReadBlock(int nBlockXOff, int nBlockYOff,
                     // Epsilon value to add to weights to avoid potential
                     // divergence to infinity if a source node is too close
                     // to the target point
-                    const double EPS = SQ(std::min(poGDS->adfGeoTransform[1],
-                                                   -poGDS->adfGeoTransform[5]) /
-                                          10);
+                    const double EPS =
+                        SQ(std::min(poGDS->m_gt[1], -poGDS->m_gt[5]) / 10);
                     for (size_t i = 0; i < adfX.size(); ++i)
                     {
                         if (afDepth[i] != m_fNoDataValue)
@@ -2146,8 +2144,10 @@ void BAGInterpolatedBand::LoadClosestRefinedNodes(
         const auto pafRefValues = poGDS->GetRefinementValues(nRefinementIndex);
         if (pafRefValues)
         {
-            adfX.push_back(dfMinRefinedX + iXAdjusted * rgrid.fResX);
-            adfY.push_back(dfMinRefinedY + iYAdjusted * rgrid.fResY);
+            adfX.push_back(dfMinRefinedX +
+                           iXAdjusted * static_cast<double>(rgrid.fResX));
+            adfY.push_back(dfMinRefinedY +
+                           iYAdjusted * static_cast<double>(rgrid.fResY));
             afDepth.push_back(pafRefValues[0]);
             afUncrt.push_back(pafRefValues[1]);
         }
@@ -2167,83 +2167,6 @@ void BAGInterpolatedBand::LoadClosestRefinedNodes(
 }
 
 /************************************************************************/
-/*                             CreateRAT()                              */
-/************************************************************************/
-
-static GDALRasterAttributeTable *
-CreateRAT(const std::shared_ptr<GDALMDArray> &poValues)
-{
-    auto poRAT = new GDALDefaultRasterAttributeTable();
-    const auto &poComponents = poValues->GetDataType().GetComponents();
-    for (const auto &poComponent : poComponents)
-    {
-        GDALRATFieldType eType;
-        if (poComponent->GetType().GetClass() == GEDTC_NUMERIC)
-        {
-            if (GDALDataTypeIsInteger(
-                    poComponent->GetType().GetNumericDataType()))
-                eType = GFT_Integer;
-            else
-                eType = GFT_Real;
-        }
-        else
-        {
-            eType = GFT_String;
-        }
-        poRAT->CreateColumn(poComponent->GetName().c_str(), eType, GFU_Generic);
-    }
-
-    const auto &oValuesDT = poValues->GetDataType();
-    std::vector<GByte> abyRow(oValuesDT.GetSize());
-    const int nRows = static_cast<int>(poValues->GetDimensions()[0]->GetSize());
-    for (int iRow = 0; iRow < nRows; iRow++)
-    {
-        const GUInt64 arrayStartIdx = static_cast<GUInt64>(iRow);
-        const size_t count = 1;
-        const GInt64 arrayStep = 0;
-        const GPtrDiff_t bufferStride = 0;
-        poValues->Read(&arrayStartIdx, &count, &arrayStep, &bufferStride,
-                       oValuesDT, &abyRow[0]);
-        int iCol = 0;
-        for (const auto &poComponent : poComponents)
-        {
-            const auto eRATType = poRAT->GetTypeOfCol(iCol);
-            if (eRATType == GFT_Integer)
-            {
-                int nValue = 0;
-                GDALCopyWords(&abyRow[poComponent->GetOffset()],
-                              poComponent->GetType().GetNumericDataType(), 0,
-                              &nValue, GDT_Int32, 0, 1);
-                poRAT->SetValue(iRow, iCol, nValue);
-            }
-            else if (eRATType == GFT_Real)
-            {
-                double dfValue = 0;
-                GDALCopyWords(&abyRow[poComponent->GetOffset()],
-                              poComponent->GetType().GetNumericDataType(), 0,
-                              &dfValue, GDT_Float64, 0, 1);
-                poRAT->SetValue(iRow, iCol, dfValue);
-            }
-            else
-            {
-                char *pszStr = nullptr;
-                GDALExtendedDataType::CopyValue(
-                    &abyRow[poComponent->GetOffset()], poComponent->GetType(),
-                    &pszStr, GDALExtendedDataType::CreateString());
-                if (pszStr)
-                {
-                    poRAT->SetValue(iRow, iCol, pszStr);
-                }
-                CPLFree(pszStr);
-            }
-            iCol++;
-        }
-        oValuesDT.FreeDynamicMemory(&abyRow[0]);
-    }
-    return poRAT;
-}
-
-/************************************************************************/
 /* ==================================================================== */
 /*                        BAGGeorefMDBandBase                           */
 /* ==================================================================== */
@@ -2260,7 +2183,7 @@ class BAGGeorefMDBandBase CPL_NON_FINAL : public GDALPamRasterBand
                         const std::shared_ptr<GDALMDArray> &poKeys,
                         GDALRasterBand *poElevBand)
         : m_poKeys(poKeys), m_poElevBand(poElevBand),
-          m_poRAT(CreateRAT(poValues))
+          m_poRAT(HDF5CreateRAT(poValues, false))
     {
     }
 
@@ -2271,6 +2194,7 @@ class BAGGeorefMDBandBase CPL_NON_FINAL : public GDALPamRasterBand
     {
         return m_poRAT.get();
     }
+
     double GetNoDataValue(int *pbSuccess) override;
 };
 
@@ -2292,7 +2216,7 @@ double BAGGeorefMDBandBase::GetNoDataValue(int *pbSuccess)
 CPLErr BAGGeorefMDBandBase::IReadBlockFromElevBand(int nBlockXOff,
                                                    int nBlockYOff, void *pImage)
 {
-    std::vector<float> afData(nBlockXSize * nBlockYSize);
+    std::vector<float> afData(static_cast<size_t>(nBlockXSize) * nBlockYSize);
     const int nXOff = nBlockXOff * nBlockXSize;
     const int nReqXSize = std::min(nBlockXSize, nRasterXSize - nXOff);
     const int nYOff = nBlockYOff * nBlockYSize;
@@ -2313,7 +2237,7 @@ CPLErr BAGGeorefMDBandBase::IReadBlockFromElevBand(int nBlockXOff,
         {
             pbyImage[y * nBlockXSize + x] =
                 (afData[y * nBlockXSize + x] == fNoDataValue ||
-                 CPLIsNan(afData[y * nBlockXSize + x]))
+                 std::isnan(afData[y * nBlockXSize + x]))
                     ? 0
                     : 1;
         }
@@ -2549,14 +2473,12 @@ void BAGDataset::InitOverviewDS(BAGDataset *poParentDS, int nXSize, int nYSize)
     m_oSRS = poParentDS->m_oSRS;
     nRasterXSize = nXSize;
     nRasterYSize = nYSize;
-    adfGeoTransform[0] = poParentDS->adfGeoTransform[0];
-    adfGeoTransform[1] = poParentDS->adfGeoTransform[1] *
-                         poParentDS->nRasterXSize / nRasterXSize;
-    adfGeoTransform[2] = poParentDS->adfGeoTransform[2];
-    adfGeoTransform[3] = poParentDS->adfGeoTransform[3];
-    adfGeoTransform[4] = poParentDS->adfGeoTransform[4];
-    adfGeoTransform[5] = poParentDS->adfGeoTransform[5] *
-                         poParentDS->nRasterYSize / nRasterYSize;
+    m_gt[0] = poParentDS->m_gt[0];
+    m_gt[1] = poParentDS->m_gt[1] * poParentDS->nRasterXSize / nRasterXSize;
+    m_gt[2] = poParentDS->m_gt[2];
+    m_gt[3] = poParentDS->m_gt[3];
+    m_gt[4] = poParentDS->m_gt[4];
+    m_gt[5] = poParentDS->m_gt[5] * poParentDS->nRasterYSize / nRasterYSize;
     m_nLowResWidth = poParentDS->m_nLowResWidth;
     m_nLowResHeight = poParentDS->m_nLowResHeight;
     m_dfLowResMinX = poParentDS->m_dfLowResMinX;
@@ -2654,30 +2576,6 @@ BAGDataset::~BAGDataset()
 }
 
 /************************************************************************/
-/*                              Identify()                              */
-/************************************************************************/
-
-int BAGDataset::Identify(GDALOpenInfo *poOpenInfo)
-
-{
-    if (STARTS_WITH(poOpenInfo->pszFilename, "BAG:"))
-        return TRUE;
-
-    // Is it an HDF5 file?
-    static const char achSignature[] = "\211HDF\r\n\032\n";
-
-    if (poOpenInfo->pabyHeader == nullptr ||
-        memcmp(poOpenInfo->pabyHeader, achSignature, 8) != 0)
-        return FALSE;
-
-    // Does it have the extension .bag?
-    if (!EQUAL(CPLGetExtension(poOpenInfo->pszFilename), "bag"))
-        return FALSE;
-
-    return TRUE;
-}
-
-/************************************************************************/
 /*                          GH5DopenNoWarning()                         */
 /************************************************************************/
 
@@ -2708,7 +2606,7 @@ GDALDataset *BAGDataset::Open(GDALOpenInfo *poOpenInfo)
 
 {
     // Confirm that this appears to be a BAG file.
-    if (!Identify(poOpenInfo))
+    if (!BAGDatasetIdentify(poOpenInfo))
         return nullptr;
 
     HDF5_GLOBAL_LOCK();
@@ -2721,8 +2619,7 @@ GDALDataset *BAGDataset::Open(GDALOpenInfo *poOpenInfo)
     // Confirm the requested access is supported.
     if (poOpenInfo->eAccess == GA_Update)
     {
-        CPLError(CE_Failure, CPLE_NotSupported,
-                 "The BAG driver does not support update access.");
+        ReportUpdateNotSupportedByDriver("BAG");
         return nullptr;
     }
 
@@ -2731,14 +2628,21 @@ GDALDataset *BAGDataset::Open(GDALOpenInfo *poOpenInfo)
     int nY = -1;
     CPLString osFilename(poOpenInfo->pszFilename);
     CPLString osGeorefMetadataLayer;
+    bool bIsSubdataset = false;
     if (STARTS_WITH(poOpenInfo->pszFilename, "BAG:"))
     {
+        bIsSubdataset = true;
         char **papszTokens =
             CSLTokenizeString2(poOpenInfo->pszFilename, ":",
                                CSLT_HONOURSTRINGS | CSLT_PRESERVEESCAPES);
 
-        if (CSLCount(papszTokens) == 4 &&
-            EQUAL(papszTokens[2], "georef_metadata"))
+        if (CSLCount(papszTokens) == 3 &&
+            EQUAL(papszTokens[2], "bathymetry_coverage"))
+        {
+            osFilename = papszTokens[1];
+        }
+        else if (CSLCount(papszTokens) == 4 &&
+                 EQUAL(papszTokens[2], "georef_metadata"))
         {
             osFilename = papszTokens[1];
             osGeorefMetadataLayer = papszTokens[3];
@@ -2824,8 +2728,8 @@ GDALDataset *BAGDataset::Open(GDALOpenInfo *poOpenInfo)
     BAGDataset *const poDS = new BAGDataset();
 
     poDS->eAccess = poOpenInfo->eAccess;
-    poDS->m_poRootGroup = poRootGroup;
-    poDS->m_poSharedResources = poSharedResources;
+    poDS->m_poRootGroup = std::move(poRootGroup);
+    poDS->m_poSharedResources = std::move(poSharedResources);
 
     // Extract version as metadata.
     CPLString osVersion;
@@ -2839,7 +2743,7 @@ GDALDataset *BAGDataset::Open(GDALOpenInfo *poOpenInfo)
     if (poOpenInfo->nOpenFlags & GDAL_OF_RASTER)
     {
         if (poDS->OpenRaster(poOpenInfo, osFilename, bOpenSuperGrid, nX, nY,
-                             osGeorefMetadataLayer, osSubDsName))
+                             bIsSubdataset, osGeorefMetadataLayer, osSubDsName))
         {
             if (!osSubDsName.empty())
             {
@@ -2875,7 +2779,7 @@ GDALDataset *BAGDataset::Open(GDALOpenInfo *poOpenInfo)
 
 bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
                             const CPLString &osFilename, bool bOpenSuperGrid,
-                            int nX, int nY,
+                            int nX, int nY, bool bIsSubdataset,
                             const CPLString &osGeorefMetadataLayer,
                             CPLString &outOsSubDsName)
 {
@@ -2997,8 +2901,7 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
             delete poElevBand;
             return false;
         }
-        const auto poValuesDims = poValues->GetDimensions();
-        if (poValuesDims.size() != 1)
+        if (poValues->GetDimensionCount() != 1)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
                      "Wrong dimensions for %s/values",
@@ -3120,23 +3023,38 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
         m_aosSubdatasets.Clear();
     }
 
-    if (osGeorefMetadataLayer.empty())
+    if (!bIsSubdataset && osGeorefMetadataLayer.empty())
     {
         auto poGeoref_metadata = m_poRootGroup->OpenGroupFromFullname(
             "/BAG_root/georef_metadata", nullptr);
         if (poGeoref_metadata)
         {
             const auto groupNames = poGeoref_metadata->GetGroupNames(nullptr);
-            for (const auto &groupName : groupNames)
+            if (!groupNames.empty())
             {
-                const int nIdx = m_aosSubdatasets.size() / 2 + 1;
-                m_aosSubdatasets.AddNameValue(
-                    CPLSPrintf("SUBDATASET_%d_NAME", nIdx),
-                    CPLSPrintf("BAG:\"%s\":georef_metadata:%s",
-                               GetDescription(), groupName.c_str()));
-                m_aosSubdatasets.AddNameValue(
-                    CPLSPrintf("SUBDATASET_%d_DESC", nIdx),
-                    CPLSPrintf("Georeferenced metadata %s", groupName.c_str()));
+                if (m_aosSubdatasets.empty())
+                {
+                    const int nIdx = 1;
+                    m_aosSubdatasets.AddNameValue(
+                        CPLSPrintf("SUBDATASET_%d_NAME", nIdx),
+                        CPLSPrintf("BAG:\"%s\":bathymetry_coverage",
+                                   GetDescription()));
+                    m_aosSubdatasets.AddNameValue(
+                        CPLSPrintf("SUBDATASET_%d_DESC", nIdx),
+                        "Bathymetry gridded data");
+                }
+                for (const auto &groupName : groupNames)
+                {
+                    const int nIdx = m_aosSubdatasets.size() / 2 + 1;
+                    m_aosSubdatasets.AddNameValue(
+                        CPLSPrintf("SUBDATASET_%d_NAME", nIdx),
+                        CPLSPrintf("BAG:\"%s\":georef_metadata:%s",
+                                   GetDescription(), groupName.c_str()));
+                    m_aosSubdatasets.AddNameValue(
+                        CPLSPrintf("SUBDATASET_%d_DESC", nIdx),
+                        CPLSPrintf("Georeferenced metadata %s",
+                                   groupName.c_str()));
+                }
             }
         }
     }
@@ -3339,16 +3257,16 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
         }
         nRasterXSize = static_cast<int>(dfRasterXSize + 0.5);
         nRasterYSize = static_cast<int>(dfRasterYSize + 0.5);
-        adfGeoTransform[0] = dfMinX;
-        adfGeoTransform[1] = dfResX;
-        adfGeoTransform[3] = dfMaxY;
-        adfGeoTransform[5] = -dfResY;
+        m_gt[0] = dfMinX;
+        m_gt[1] = dfResX;
+        m_gt[3] = dfMaxY;
+        m_gt[5] = -dfResY;
         if (pszMaxY == nullptr || pszMinY != nullptr)
         {
             // if the constraint is not given by MAXY, we may need to tweak
-            // adfGeoTransform[3] / maxy, so that we get the requested MINY
+            // m_gt[3] / maxy, so that we get the requested MINY
             // value
-            adfGeoTransform[3] += dfMinY - (dfMaxY - nRasterYSize * dfResY);
+            m_gt[3] += dfMinY - (dfMaxY - nRasterYSize * dfResY);
         }
 
         const double dfMinRes = std::min(dfMinResX, dfMinResY);
@@ -3406,7 +3324,7 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
                                  nRasterYSize / nOvrFactor >= nMinOvrSize;
              nOvrFactor *= 2)
         {
-            auto poOvrDS = cpl::make_unique<BAGDataset>(this, nOvrFactor);
+            auto poOvrDS = std::make_unique<BAGDataset>(this, nOvrFactor);
 
             for (int i = 1; i <= GetRasterCount(); i++)
             {
@@ -3430,7 +3348,7 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
         // Use the low resolution grid as the last overview level
         if (bCanUseLowResAsOvr)
         {
-            auto poOvrDS = cpl::make_unique<BAGDataset>(this, m_nLowResWidth,
+            auto poOvrDS = std::make_unique<BAGDataset>(this, m_nLowResWidth,
                                                         m_nLowResHeight);
 
             poElevBand = new BAGRasterBand(poOvrDS.get(), 1);
@@ -3473,17 +3391,18 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
         nRasterYSize = static_cast<int>(pSuperGrid.nHeight);
 
         // Convert from pixel-center convention to corner-pixel convention
-        const double dfMinX = adfGeoTransform[0] + nX * adfGeoTransform[1] +
-                              pSuperGrid.fSWX - pSuperGrid.fResX / 2;
-        const double dfMinY =
-            adfGeoTransform[3] + m_nLowResHeight * adfGeoTransform[5] +
-            nY * -adfGeoTransform[5] + pSuperGrid.fSWY - pSuperGrid.fResY / 2;
-        const double dfMaxY = dfMinY + pSuperGrid.nHeight * pSuperGrid.fResY;
+        const double dfMinX =
+            m_gt[0] + nX * m_gt[1] + pSuperGrid.fSWX - pSuperGrid.fResX / 2;
+        const double dfMinY = m_gt[3] + m_nLowResHeight * m_gt[5] +
+                              nY * -m_gt[5] + pSuperGrid.fSWY -
+                              pSuperGrid.fResY / 2;
+        const double dfMaxY =
+            dfMinY + pSuperGrid.nHeight * static_cast<double>(pSuperGrid.fResY);
 
-        adfGeoTransform[0] = dfMinX;
-        adfGeoTransform[1] = pSuperGrid.fResX;
-        adfGeoTransform[3] = dfMaxY;
-        adfGeoTransform[5] = -pSuperGrid.fResY;
+        m_gt[0] = dfMinX;
+        m_gt[1] = pSuperGrid.fResX;
+        m_gt[3] = dfMaxY;
+        m_gt[5] = -pSuperGrid.fResY;
         m_nSuperGridRefinementStartIndex = pSuperGrid.nIndex;
 
         if (!osGeorefMetadataLayer.empty())
@@ -3530,8 +3449,7 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
                          osGeorefMetadataLayer.c_str());
                 return false;
             }
-            const auto poValuesDims = poValues->GetDimensions();
-            if (poValuesDims.size() != 1)
+            if (poValues->GetDimensionCount() != 1)
             {
                 CPLError(CE_Failure, CPLE_AppDefined,
                          "Wrong dimensions for %s/values",
@@ -3580,7 +3498,7 @@ bool BAGDataset::OpenRaster(GDALOpenInfo *poOpenInfo,
 /*                            GetLayer()                                */
 /************************************************************************/
 
-OGRLayer *BAGDataset::GetLayer(int idx)
+const OGRLayer *BAGDataset::GetLayer(int idx) const
 {
     if (idx != 0)
         return nullptr;
@@ -3601,17 +3519,21 @@ class BAGTrackingListLayer final
 
     OGRFeature *GetNextRawFeature();
 
+    CPL_DISALLOW_COPY_ASSIGN(BAGTrackingListLayer)
+
   public:
     explicit BAGTrackingListLayer(const std::shared_ptr<GDALMDArray> &poArray);
-    ~BAGTrackingListLayer();
+    ~BAGTrackingListLayer() override;
 
-    OGRFeatureDefn *GetLayerDefn() override
+    const OGRFeatureDefn *GetLayerDefn() const override
     {
         return m_poFeatureDefn;
     }
+
     void ResetReading() override;
     DEFINE_GET_NEXT_FEATURE_THROUGH_RAW(BAGTrackingListLayer)
-    int TestCapability(const char *) override
+
+    int TestCapability(const char *) const override
     {
         return false;
     }
@@ -3766,8 +3688,8 @@ GDALDataset *BAGDataset::OpenForCreate(GDALOpenInfo *poOpenInfo, int nXSizeIn,
     BAGDataset *const poDS = new BAGDataset();
 
     poDS->eAccess = poOpenInfo->eAccess;
-    poDS->m_poRootGroup = poRootGroup;
-    poDS->m_poSharedResources = poSharedResources;
+    poDS->m_poRootGroup = std::move(poRootGroup);
+    poDS->m_poSharedResources = std::move(poSharedResources);
     poDS->m_aosCreationOptions = papszCreationOptions;
 
     poDS->nRasterXSize = nXSizeIn;
@@ -3820,9 +3742,10 @@ bool BAGDataset::GetMeanSupergridsResolution(double &dfResX, double &dfResY)
     dfResX = 0.0;
     dfResY = 0.0;
     int nValidSuperGrids = 0;
-    std::vector<BAGRefinementGrid> rgrids(nChunkXSize * nChunkYSize);
-    const int county = (m_nLowResHeight + nChunkYSize - 1) / nChunkYSize;
-    const int countx = (m_nLowResWidth + nChunkXSize - 1) / nChunkXSize;
+    std::vector<BAGRefinementGrid> rgrids(static_cast<size_t>(nChunkXSize) *
+                                          nChunkYSize);
+    const int county = DIV_ROUND_UP(m_nLowResHeight, nChunkYSize);
+    const int countx = DIV_ROUND_UP(m_nLowResWidth, nChunkXSize);
     for (int y = 0; y < county; y++)
     {
         const int nReqCountY =
@@ -3984,7 +3907,8 @@ bool BAGDataset::ReadVarresMetadataValue(int y, int x, hid_t memspace,
                                          int width)
 {
     constexpr int metadata_elt_size = 3 * 4 + 4 * 4;  // 3 uint and 4 float
-    std::vector<char> buffer(metadata_elt_size * height * width);
+    std::vector<char> buffer(static_cast<size_t>(metadata_elt_size) * height *
+                             width);
 
     hsize_t count[2] = {static_cast<hsize_t>(height),
                         static_cast<hsize_t>(width)};
@@ -4219,18 +4143,22 @@ bool BAGDataset::LookForRefinementGrids(CSLConstList l_papszOpenOptions,
 
     const char *pszSUPERGRIDS =
         CSLFetchNameValue(l_papszOpenOptions, "SUPERGRIDS_INDICES");
+
     struct yx
     {
         int y;
         int x;
+
         yx(int yin, int xin) : y(yin), x(xin)
         {
         }
+
         bool operator<(const yx &other) const
         {
             return y < other.y || (y == other.y && x < other.x);
         }
     };
+
     std::set<yx> oSupergrids;
     int nMinX = 0;
     int nMinY = 0;
@@ -4367,22 +4295,18 @@ bool BAGDataset::LookForRefinementGrids(CSLConstList l_papszOpenOptions,
         dfFilterMaxY = CPLAtof(pszMaxY);
 
         nMinX = std::max(nMinX,
-                         static_cast<int>((dfFilterMinX - adfGeoTransform[0]) /
-                                          adfGeoTransform[1]));
+                         static_cast<int>((dfFilterMinX - m_gt[0]) / m_gt[1]));
         nMaxX = std::min(nMaxX,
-                         static_cast<int>((dfFilterMaxX - adfGeoTransform[0]) /
-                                          adfGeoTransform[1]));
+                         static_cast<int>((dfFilterMaxX - m_gt[0]) / m_gt[1]));
 
         nMinY = std::max(
             nMinY, static_cast<int>(
-                       (dfFilterMinY - (adfGeoTransform[3] +
-                                        m_nLowResHeight * adfGeoTransform[5])) /
-                       -adfGeoTransform[5]));
+                       (dfFilterMinY - (m_gt[3] + m_nLowResHeight * m_gt[5])) /
+                       -m_gt[5]));
         nMaxY = std::min(
             nMaxY, static_cast<int>(
-                       (dfFilterMaxY - (adfGeoTransform[3] +
-                                        m_nLowResHeight * adfGeoTransform[5])) /
-                       -adfGeoTransform[5]));
+                       (dfFilterMaxY - (m_gt[3] + m_nLowResHeight * m_gt[5])) /
+                       -m_gt[5]));
     }
     else if (nCountBBoxElts > 0)
     {
@@ -4412,7 +4336,8 @@ bool BAGDataset::LookForRefinementGrids(CSLConstList l_papszOpenOptions,
         atoi(CPLGetConfigOption("GDAL_BAG_MAX_SIZE_VARRES_MAP", "50000000"));
     const int nChunkXSize = m_nChunkXSizeVarresMD;
     const int nChunkYSize = m_nChunkYSizeVarresMD;
-    std::vector<BAGRefinementGrid> rgrids(nChunkXSize * nChunkYSize);
+    std::vector<BAGRefinementGrid> rgrids(static_cast<size_t>(nChunkXSize) *
+                                          nChunkYSize);
     bool bOK = true;
     for (int blockY = nMinY / nChunkYSize; bOK && blockY <= nMaxY / nChunkYSize;
          blockY++)
@@ -4491,10 +4416,10 @@ bool BAGDataset::LookForRefinementGrids(CSLConstList l_papszOpenOptions,
                             // 0.1 is to deal with numeric imprecisions
                             rgrid.fSWX +
                                     (rgrid.nWidth - 1 - 0.1) * rgrid.fResX >
-                                adfGeoTransform[1] ||
+                                m_gt[1] ||
                             rgrid.fSWY +
                                     (rgrid.nHeight - 1 - 0.1) * rgrid.fResY >
-                                -adfGeoTransform[5])
+                                -m_gt[5])
                         {
                             CPLError(
                                 CE_Failure, CPLE_NotSupported,
@@ -4545,18 +4470,17 @@ bool BAGDataset::LookForRefinementGrids(CSLConstList l_papszOpenOptions,
                             return false;
                         }
 
-                        const double dfMinX = adfGeoTransform[0] +
-                                              x * adfGeoTransform[1] +
+                        const double dfMinX = m_gt[0] + x * m_gt[1] +
                                               rgrid.fSWX - rgrid.fResX / 2;
                         const double dfMaxX =
-                            dfMinX + rgrid.nWidth * rgrid.fResX;
+                            dfMinX +
+                            rgrid.nWidth * static_cast<double>(rgrid.fResX);
                         const double dfMinY =
-                            adfGeoTransform[3] +
-                            m_nLowResHeight * adfGeoTransform[5] +
-                            y * -adfGeoTransform[5] + rgrid.fSWY -
-                            rgrid.fResY / 2;
+                            m_gt[3] + m_nLowResHeight * m_gt[5] + y * -m_gt[5] +
+                            rgrid.fSWY - rgrid.fResY / 2;
                         const double dfMaxY =
-                            dfMinY + rgrid.nHeight * rgrid.fResY;
+                            dfMinY +
+                            static_cast<double>(rgrid.nHeight) * rgrid.fResY;
 
                         if ((oSupergrids.empty() ||
                              oSupergrids.find(yx(static_cast<int>(y),
@@ -4771,21 +4695,19 @@ void BAGDataset::LoadMetadata()
                 }
             }
 
-            adfGeoTransform[0] = dfLLX;
-            adfGeoTransform[1] = dfResWidth;
-            adfGeoTransform[3] = dfLLY + dfResHeight * (m_nLowResHeight - 1);
-            adfGeoTransform[5] = dfResHeight * (-1);
+            m_gt[0] = dfLLX;
+            m_gt[1] = dfResWidth;
+            m_gt[3] = dfLLY + dfResHeight * (m_nLowResHeight - 1);
+            m_gt[5] = dfResHeight * (-1);
 
             // shift to pixel corner convention
-            adfGeoTransform[0] -= adfGeoTransform[1] * 0.5;
-            adfGeoTransform[3] -= adfGeoTransform[5] * 0.5;
+            m_gt[0] -= m_gt[1] * 0.5;
+            m_gt[3] -= m_gt[5] * 0.5;
 
-            m_dfLowResMinX = adfGeoTransform[0];
-            m_dfLowResMaxX =
-                m_dfLowResMinX + m_nLowResWidth * adfGeoTransform[1];
-            m_dfLowResMaxY = adfGeoTransform[3];
-            m_dfLowResMinY =
-                m_dfLowResMaxY + m_nLowResHeight * adfGeoTransform[5];
+            m_dfLowResMinX = m_gt[0];
+            m_dfLowResMaxX = m_dfLowResMinX + m_nLowResWidth * m_gt[1];
+            m_dfLowResMaxY = m_gt[3];
+            m_dfLowResMinY = m_dfLowResMaxY + m_nLowResHeight * m_gt[5];
         }
         CSLDestroy(papszCornerTokens);
     }
@@ -4948,7 +4870,7 @@ OGRErr BAGDataset::ParseWKTFromXML(const char *pszISOXML)
                     &m_oSRS, &oVertCRS);
                 oCompoundCRS.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
 
-                m_oSRS = oCompoundCRS;
+                m_oSRS = std::move(oCompoundCRS);
             }
 
             CPLFree(pszVertCRSWKT);
@@ -4964,16 +4886,16 @@ OGRErr BAGDataset::ParseWKTFromXML(const char *pszISOXML)
 /*                          GetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr BAGDataset::GetGeoTransform(double *padfGeoTransform)
+CPLErr BAGDataset::GetGeoTransform(GDALGeoTransform &gt) const
 
 {
-    if (adfGeoTransform[0] != 0.0 || adfGeoTransform[3] != 0.0)
+    if (m_gt[0] != 0.0 || m_gt[3] != 0.0)
     {
-        memcpy(padfGeoTransform, adfGeoTransform, sizeof(double) * 6);
+        gt = m_gt;
         return CE_None;
     }
 
-    return GDALPamDataset::GetGeoTransform(padfGeoTransform);
+    return GDALPamDataset::GetGeoTransform(gt);
 }
 
 /************************************************************************/
@@ -4991,18 +4913,18 @@ const OGRSpatialReference *BAGDataset::GetSpatialRef() const
 /*                          SetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr BAGDataset::SetGeoTransform(double *padfGeoTransform)
+CPLErr BAGDataset::SetGeoTransform(const GDALGeoTransform &gt)
 {
     if (eAccess == GA_ReadOnly)
-        return GDALPamDataset::SetGeoTransform(padfGeoTransform);
+        return GDALPamDataset::SetGeoTransform(gt);
 
-    if (padfGeoTransform[2] != 0 || padfGeoTransform[4] != 0)
+    if (gt[2] != 0 || gt[4] != 0)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
                  "BAG driver requires a non-rotated geotransform");
         return CE_Failure;
     }
-    memcpy(adfGeoTransform, padfGeoTransform, sizeof(double) * 6);
+    m_gt = gt;
     return WriteMetadataIfNeeded() ? CE_None : CE_Failure;
 }
 
@@ -5036,17 +4958,15 @@ bool BAGDataset::WriteMetadataIfNeeded()
     {
         return true;
     }
-    if ((adfGeoTransform[0] == 0.0 && adfGeoTransform[1] == 1.0 &&
-         adfGeoTransform[3] == 0.0 && adfGeoTransform[5] == 1.0) ||
-        m_oSRS.IsEmpty())
+    if (m_gt == GDALGeoTransform() || m_oSRS.IsEmpty())
     {
         return true;
     }
     m_bMetadataWritten = true;
 
     CPLString osXMLMetadata = BAGCreator::GenerateMetadata(
-        nRasterXSize, nRasterYSize, adfGeoTransform,
-        m_oSRS.IsEmpty() ? nullptr : &m_oSRS, m_aosCreationOptions.List());
+        nRasterXSize, nRasterYSize, m_gt, m_oSRS.IsEmpty() ? nullptr : &m_oSRS,
+        m_aosCreationOptions.List());
     if (osXMLMetadata.empty())
     {
         return false;
@@ -5262,7 +5182,7 @@ bool BAGCreator::SubstituteVariables(CPLXMLNode *psNode, char **papszDict)
 /************************************************************************/
 
 CPLString BAGCreator::GenerateMetadata(int nXSize, int nYSize,
-                                       const double *padfGeoTransform,
+                                       const GDALGeoTransform &gt,
                                        const OGRSpatialReference *poSRS,
                                        char **papszOptions)
 {
@@ -5275,16 +5195,35 @@ CPLString BAGCreator::GenerateMetadata(int nXSize, int nYSize,
     }
     else
     {
+#ifndef USE_ONLY_EMBEDDED_RESOURCE_FILES
+#ifdef EMBED_RESOURCE_FILES
+        CPLErrorStateBackuper oErrorStateBackuper(CPLQuietErrorHandler);
+#endif
         const char *pszDefaultTemplateFilename =
             CPLFindFile("gdal", "bag_template.xml");
         if (pszDefaultTemplateFilename == nullptr)
+#endif
         {
+#ifdef EMBED_RESOURCE_FILES
+            static const bool bOnce [[maybe_unused]] = []()
+            {
+                CPLDebug("BAG", "Using embedded bag_template.xml");
+                return true;
+            }();
+            psRoot = CPLParseXMLString(BAGGetEmbeddedTemplateFile());
+#else
             CPLError(CE_Failure, CPLE_AppDefined,
                      "Cannot find bag_template.xml and TEMPLATE "
                      "creation option not specified");
             return CPLString();
+#endif
         }
-        psRoot = CPLParseXMLFile(pszDefaultTemplateFilename);
+#ifndef USE_ONLY_EMBEDDED_RESOURCE_FILES
+        else
+        {
+            psRoot = CPLParseXMLFile(pszDefaultTemplateFilename);
+        }
+#endif
     }
     if (psRoot == nullptr)
         return CPLString();
@@ -5333,13 +5272,10 @@ CPLString BAGCreator::GenerateMetadata(int nXSize, int nYSize,
                        brokenDown.tm_min, brokenDown.tm_sec));
     }
 
-    osOptions.SetNameValue("VAR_RESX",
-                           CPLSPrintf("%.18g", padfGeoTransform[1]));
-    osOptions.SetNameValue("VAR_RESY",
-                           CPLSPrintf("%.18g", fabs(padfGeoTransform[5])));
-    osOptions.SetNameValue(
-        "VAR_RES", CPLSPrintf("%.18g", std::max(padfGeoTransform[1],
-                                                fabs(padfGeoTransform[5]))));
+    osOptions.SetNameValue("VAR_RESX", CPLSPrintf("%.17g", gt[1]));
+    osOptions.SetNameValue("VAR_RESY", CPLSPrintf("%.17g", fabs(gt[5])));
+    osOptions.SetNameValue("VAR_RES",
+                           CPLSPrintf("%.17g", std::max(gt[1], fabs(gt[5]))));
 
     char *pszProjection = nullptr;
     if (poSRS)
@@ -5391,18 +5327,18 @@ CPLString BAGCreator::GenerateMetadata(int nXSize, int nYSize,
     osOptions.SetNameValue("VAR_RES_UNIT", pszUnits);
 
     // get bounds as pixel center
-    double dfMinX = padfGeoTransform[0] + padfGeoTransform[1] / 2;
-    double dfMaxX = dfMinX + (nXSize - 1) * padfGeoTransform[1];
-    double dfMaxY = padfGeoTransform[3] + padfGeoTransform[5] / 2;
-    double dfMinY = dfMaxY + (nYSize - 1) * padfGeoTransform[5];
+    double dfMinX = gt[0] + gt[1] / 2;
+    double dfMaxX = dfMinX + (nXSize - 1) * gt[1];
+    double dfMaxY = gt[3] + gt[5] / 2;
+    double dfMinY = dfMaxY + (nYSize - 1) * gt[5];
 
-    if (padfGeoTransform[5] > 0)
+    if (gt[5] > 0)
     {
         std::swap(dfMinY, dfMaxY);
     }
     osOptions.SetNameValue(
         "VAR_CORNER_POINTS",
-        CPLSPrintf("%.18g,%.18g %.18g,%.18g", dfMinX, dfMinY, dfMaxX, dfMaxY));
+        CPLSPrintf("%.17g,%.17g %.17g,%.17g", dfMinX, dfMinY, dfMaxX, dfMaxY));
 
     double adfCornerX[4] = {dfMinX, dfMinX, dfMaxX, dfMaxX};
     double adfCornerY[4] = {dfMinY, dfMaxY, dfMaxY, dfMinY};
@@ -5429,10 +5365,10 @@ CPLString BAGCreator::GenerateMetadata(int nXSize, int nYSize,
                              std::max(adfCornerX[2], adfCornerX[3]));
     double dfNorth = std::max(std::max(adfCornerY[0], adfCornerY[1]),
                               std::max(adfCornerY[2], adfCornerY[3]));
-    osOptions.SetNameValue("VAR_WEST_LONGITUDE", CPLSPrintf("%.18g", dfWest));
-    osOptions.SetNameValue("VAR_SOUTH_LATITUDE", CPLSPrintf("%.18g", dfSouth));
-    osOptions.SetNameValue("VAR_EAST_LONGITUDE", CPLSPrintf("%.18g", dfEast));
-    osOptions.SetNameValue("VAR_NORTH_LATITUDE", CPLSPrintf("%.18g", dfNorth));
+    osOptions.SetNameValue("VAR_WEST_LONGITUDE", CPLSPrintf("%.17g", dfWest));
+    osOptions.SetNameValue("VAR_SOUTH_LATITUDE", CPLSPrintf("%.17g", dfSouth));
+    osOptions.SetNameValue("VAR_EAST_LONGITUDE", CPLSPrintf("%.17g", dfEast));
+    osOptions.SetNameValue("VAR_NORTH_LATITUDE", CPLSPrintf("%.17g", dfNorth));
 
     if (!SubstituteVariables(psMain, osOptions.List()))
     {
@@ -5627,8 +5563,8 @@ bool BAGCreator::CreateElevationOrUncertainty(
     const int nYSize = poSrcDS->GetRasterYSize();
     const int nXSize = poSrcDS->GetRasterXSize();
 
-    double adfGeoTransform[6];
-    poSrcDS->GetGeoTransform(adfGeoTransform);
+    GDALGeoTransform gt;
+    poSrcDS->GetGeoTransform(gt);
 
     hsize_t dims[2] = {static_cast<hsize_t>(nYSize),
                        static_cast<hsize_t>(nXSize)};
@@ -5698,13 +5634,14 @@ bool BAGCreator::CreateElevationOrUncertainty(
         if (hFileSpace < 0)
             break;
 
-        int nYBlocks =
-            static_cast<int>((nYSize + nBlockYSize - 1) / nBlockYSize);
-        int nXBlocks =
-            static_cast<int>((nXSize + nBlockXSize - 1) / nBlockXSize);
-        std::vector<float> afValues(nBlockYSize * nBlockXSize);
+        const int nYBlocks =
+            static_cast<int>(DIV_ROUND_UP(nYSize, nBlockYSize));
+        const int nXBlocks =
+            static_cast<int>(DIV_ROUND_UP(nXSize, nBlockXSize));
+        std::vector<float> afValues(static_cast<size_t>(nBlockYSize) *
+                                    nBlockXSize);
         ret = true;
-        const bool bReverseY = adfGeoTransform[5] < 0;
+        const bool bReverseY = gt[5] < 0;
 
         float fMin = std::numeric_limits<float>::infinity();
         float fMax = -std::numeric_limits<float>::infinity();
@@ -5788,8 +5725,8 @@ bool BAGCreator::CreateElevationOrUncertainty(
                     H5Sclose(hMemSpace);
 
                     if (!pfnProgress(
-                            static_cast<double>(iY * nXBlocks + iX + 1) /
-                                (nXBlocks * nYBlocks),
+                            (static_cast<double>(iY) * nXBlocks + iX + 1) /
+                                (static_cast<double>(nXBlocks) * nYBlocks),
                             "", pProgressData))
                     {
                         ret = false;
@@ -5883,14 +5820,14 @@ bool BAGCreator::Create(const char *pszFilename, GDALDataset *poSrcDS,
                  nBands);
         return false;
     }
-    double adfGeoTransform[6];
-    if (poSrcDS->GetGeoTransform(adfGeoTransform) != CE_None)
+    GDALGeoTransform gt;
+    if (poSrcDS->GetGeoTransform(gt) != CE_None)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
                  "BAG driver requires a source dataset with a geotransform");
         return false;
     }
-    if (adfGeoTransform[2] != 0 || adfGeoTransform[4] != 0)
+    if (gt[2] != 0 || gt[4] != 0)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
                  "BAG driver requires a source dataset with a non-rotated "
@@ -5898,9 +5835,9 @@ bool BAGCreator::Create(const char *pszFilename, GDALDataset *poSrcDS,
         return false;
     }
 
-    CPLString osXMLMetadata = GenerateMetadata(
-        poSrcDS->GetRasterXSize(), poSrcDS->GetRasterYSize(), adfGeoTransform,
-        poSrcDS->GetSpatialRef(), papszOptions);
+    CPLString osXMLMetadata =
+        GenerateMetadata(poSrcDS->GetRasterXSize(), poSrcDS->GetRasterYSize(),
+                         gt, poSrcDS->GetSpatialRef(), papszOptions);
     if (osXMLMetadata.empty())
     {
         return false;
@@ -6020,105 +5957,14 @@ void GDALRegister_BAG()
     if (!GDAL_CHECK_VERSION("BAG"))
         return;
 
-    if (GDALGetDriverByName("BAG") != nullptr)
+    if (GDALGetDriverByName(BAG_DRIVER_NAME) != nullptr)
         return;
 
     GDALDriver *poDriver = new GDALDriver();
 
-    poDriver->SetDescription("BAG");
-    poDriver->SetMetadataItem(GDAL_DCAP_RASTER, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_VECTOR, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_LONGNAME, "Bathymetry Attributed Grid");
-    poDriver->SetMetadataItem(GDAL_DMD_HELPTOPIC, "drivers/raster/bag.html");
-    poDriver->SetMetadataItem(GDAL_DCAP_VIRTUALIO, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_EXTENSION, "bag");
-
-    poDriver->SetMetadataItem(GDAL_DMD_CREATIONDATATYPES, "Float32");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_OPENOPTIONLIST,
-        "<OpenOptionList>"
-        "   <Option name='MODE' type='string-select' default='AUTO'>"
-        "       <Value>AUTO</Value>"
-        "       <Value>LOW_RES_GRID</Value>"
-        "       <Value>LIST_SUPERGRIDS</Value>"
-        "       <Value>RESAMPLED_GRID</Value>"
-        "       <Value>INTERPOLATED</Value>"
-        "   </Option>"
-        "   <Option name='SUPERGRIDS_INDICES' type='string' description="
-        "'Tuple(s) (y1,x1),(y2,x2),...  of supergrids, by indices, to expose "
-        "as subdatasets'/>"
-        "   <Option name='MINX' type='float' description='Minimum X value of "
-        "area of interest'/>"
-        "   <Option name='MINY' type='float' description='Minimum Y value of "
-        "area of interest'/>"
-        "   <Option name='MAXX' type='float' description='Maximum X value of "
-        "area of interest'/>"
-        "   <Option name='MAXY' type='float' description='Maximum Y value of "
-        "area of interest'/>"
-        "   <Option name='RESX' type='float' description="
-        "'Horizontal resolution. Only used for "
-        "MODE=RESAMPLED_GRID/INTERPOLATED'/>"
-        "   <Option name='RESY' type='float' description="
-        "'Vertical resolution (positive value). Only used for "
-        "MODE=RESAMPLED_GRID/INTERPOLATED'/>"
-        "   <Option name='RES_STRATEGY' type='string-select' description="
-        "'Which strategy to apply to select the resampled grid resolution. "
-        "Only used for MODE=RESAMPLED_GRID/INTERPOLATED' default='AUTO'>"
-        "       <Value>AUTO</Value>"
-        "       <Value>MIN</Value>"
-        "       <Value>MAX</Value>"
-        "       <Value>MEAN</Value>"
-        "   </Option>"
-        "   <Option name='RES_FILTER_MIN' type='float' description="
-        "'Minimum resolution of supergrids to take into account (excluded "
-        "bound). "
-        "Only used for MODE=RESAMPLED_GRID, INTERPOLATED or LIST_SUPERGRIDS' "
-        "default='0'/>"
-        "   <Option name='RES_FILTER_MAX' type='float' description="
-        "'Maximum resolution of supergrids to take into account (included "
-        "bound). "
-        "Only used for MODE=RESAMPLED_GRID, INTERPOLATED or LIST_SUPERGRIDS' "
-        "default='inf'/>"
-        "   <Option name='VALUE_POPULATION' type='string-select' description="
-        "'Which value population strategy to apply to compute the resampled "
-        "cell "
-        "values. Only used for MODE=RESAMPLED_GRID' default='MAX'>"
-        "       <Value>MIN</Value>"
-        "       <Value>MAX</Value>"
-        "       <Value>MEAN</Value>"
-        "       <Value>COUNT</Value>"
-        "   </Option>"
-        "   <Option name='SUPERGRIDS_MASK' type='boolean' description="
-        "'Whether the dataset should consist of a mask band indicating if a "
-        "supergrid node matches each target pixel. Only used for "
-        "MODE=RESAMPLED_GRID' default='NO'/>"
-        "   <Option name='NODATA_VALUE' type='float' default='1000000'/>"
-        "   <Option name='REPORT_VERTCRS' type='boolean' default='YES'/>"
-        "</OpenOptionList>");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_CREATIONOPTIONLIST,
-        "<CreationOptionList>"
-        "  <Option name='VAR_*' type='string' description="
-        "'Value to substitute to a variable in the template'/>"
-        "  <Option name='TEMPLATE' type='string' description="
-        "'.xml template to use'/>"
-        "  <Option name='BAG_VERSION' type='string' description="
-        "'Version to write in the Bag Version attribute' default='1.6.2'/>"
-        "  <Option name='COMPRESS' type='string-select' default='DEFLATE'>"
-        "    <Value>NONE</Value>"
-        "    <Value>DEFLATE</Value>"
-        "  </Option>"
-        "  <Option name='ZLEVEL' type='int' "
-        "description='DEFLATE compression level 1-9' default='6' />"
-        "  <Option name='BLOCK_SIZE' type='int' description='Chunk size' />"
-        "</CreationOptionList>");
-
-    poDriver->SetMetadataItem(GDAL_DCAP_MULTIDIM_RASTER, "YES");
+    BAGDriverSetCommonMetadata(poDriver);
 
     poDriver->pfnOpen = BAGDataset::Open;
-    poDriver->pfnIdentify = BAGDataset::Identify;
     poDriver->pfnUnloadDriver = BAGDatasetDriverUnload;
     poDriver->pfnCreateCopy = BAGDataset::CreateCopy;
     poDriver->pfnCreate = BAGDataset::Create;

@@ -1,14 +1,10 @@
 import * as gdal from 'gdal-async'
-import * as chai from 'chai'
+import { assert } from 'chai'
 import * as path from 'path'
 import * as semver from 'semver'
-const assert = chai.assert
-import * as chaiAsPromised from 'chai-as-promised'
-chai.use(chaiAsPromised)
 
 describe('gdal', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('contourGenerate()', () => {
     let src: gdal.Dataset, srcband: gdal.RasterBand, dst: gdal.Dataset, lyr: gdal.Layer
@@ -38,7 +34,7 @@ describe('gdal', () => {
     afterEach(() => {
       try {
         dst.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -62,7 +58,9 @@ describe('gdal', () => {
           (feature.fields.get('elev') - offset) % interval === 0,
           'contour used correct interval / base'
         )
-        assert.isFalse(feature.getGeometry().isEmpty())
+        const geom = feature.getGeometry()
+        assert.isNotNull(geom)
+        assert.isFalse(geom.isEmpty())
       })
     })
     it('should accept an array of fixed levels', () => {
@@ -88,7 +86,9 @@ describe('gdal', () => {
           elev,
           'contour elevation in array of fixed levels'
         )
-        assert.isFalse(feature.getGeometry().isEmpty())
+        const geom = feature.getGeometry()
+        assert.isNotNull(geom)
+        assert.isFalse(geom.isEmpty())
         if (actual_levels.indexOf(elev) === -1) actual_levels.push(elev)
       })
 
@@ -178,7 +178,7 @@ describe('gdal', () => {
     afterEach(() => {
       try {
         src.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -243,7 +243,7 @@ describe('gdal', () => {
     afterEach(() => {
       try {
         src.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -261,6 +261,14 @@ describe('gdal', () => {
 
       assert.notEqual(a, b)
       assert.notEqual(b, c)
+    })
+    it('should generate unique checksum for a TIFF', () => {
+      const ds = gdal.open(path.resolve(__dirname, 'data', 'sample.tif'))
+      const band = ds.bands.get(1)
+      const r = gdal.checksumImage(band)
+
+      assert.isNumber(r)
+      assert.isAbove(r, 0)
     })
   })
   describe('checksumImageAsync()', () => {
@@ -307,7 +315,7 @@ describe('gdal', () => {
     afterEach(() => {
       try {
         src.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -389,7 +397,7 @@ describe('gdal', () => {
     after(() => {
       try {
         src.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -401,7 +409,7 @@ describe('gdal', () => {
     afterEach(() => {
       try {
         dst.close()
-      } catch (err) {
+      } catch (_err) {
         /* ignore */
       }
     })
@@ -416,6 +424,7 @@ describe('gdal', () => {
       assert.equal(lyr.features.count(), 2)
       lyr.features.forEach((f) => {
         const geom = f.getGeometry()
+        assert.isNotNull(geom)
         assert.isFalse(geom.isEmpty())
         assert.instanceOf(geom, gdal.Polygon)
       })
@@ -438,12 +447,12 @@ describe('gdal', () => {
   describe('addPixelFunc()', () => {
     it('should throw with invalid arguments', () => {
       assert.throws(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (gdal.addPixelFunc as any)(1, 2)
+        // @ts-expect-error voluntary error
+        gdal.addPixelFunc(1, 2)
       }, /name must be a string/)
       assert.throws(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (gdal.addPixelFunc as any)('func', 2)
+        // @ts-expect-error voluntary error
+        gdal.addPixelFunc('func', 2)
       }, /pixelFn must be an object/)
       assert.throws(() => {
         gdal.addPixelFunc('func', new Uint8Array(48))
@@ -465,6 +474,10 @@ describe('gdal', () => {
         assert.instanceOf(sources[0], Float64Array)
         assert.instanceOf(sources[1], Float64Array)
         assert.instanceOf(buffer, Float64Array)
+        if (args.SOURCE_NAMES) {
+          // GDAL 3.11 adds a new argument that is always present
+          delete args.SOURCE_NAMES
+        }
         assert.isEmpty(args)
         for (let i = 0; i < buffer.length; i++) {
           buffer[i] = sources[0][i] + sources[1][i] + 1
@@ -583,7 +596,7 @@ describe('gdal', () => {
     it('should pass any additional arguments', function () {
       if (!semver.gte(gdal.version, '3.5.0-git')) this.skip()
       const withArgs = (sources: gdal.TypedArray[], buffer: gdal.TypedArray, args: Record<string, string|number>) => {
-        assert.deepEqual(args, { s: 'stringArg', k: 20, t: 15, pi: 3.14 })
+        assert.include(args, { s: 'stringArg', k: 20, t: 15, pi: 3.14 })
         assert.isString(args.s)
         assert.isNumber(args.k)
         assert.isNumber(args.t)

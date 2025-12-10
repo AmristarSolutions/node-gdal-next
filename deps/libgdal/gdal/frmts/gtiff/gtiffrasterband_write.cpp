@@ -8,32 +8,19 @@
  * Copyright (c) 1998, 2002, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2007-2015, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "gtiffrasterband.h"
 #include "gtiffdataset.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "cpl_vsi_virtual.h"
+#include "gdal_priv_templates.hpp"
+#include "gdal_priv.h"
 #include "gtiff.h"
 #include "tifvsi.h"
 
@@ -44,7 +31,21 @@
 CPLErr GTiffRasterBand::SetDefaultRAT(const GDALRasterAttributeTable *poRAT)
 {
     m_poGDS->LoadGeoreferencingAndPamIfNeeded();
-    return GDALPamRasterBand::SetDefaultRAT(poRAT);
+    m_bRATSet = true;
+    m_bRATTriedReadingFromPAM = true;
+    if (poRAT)
+        m_poRAT.reset(poRAT->Clone());
+    else
+        m_poRAT.reset();
+    const bool bWriteToPAM =
+        CPLTestBool(CPLGetConfigOption("GTIFF_WRITE_RAT_TO_PAM", "NO"));
+    if (!bWriteToPAM)
+        m_poGDS->m_bMetadataChanged = true;
+    if (bWriteToPAM || GDALPamRasterBand::GetDefaultRAT())
+    {
+        return GDALPamRasterBand::SetDefaultRAT(poRAT);
+    }
+    return CE_None;
 }
 
 /************************************************************************/
@@ -273,7 +274,7 @@ CPLErr GTiffRasterBand::SetUnitType(const char *pszNewValue)
     if (osNewValue.compare(m_osUnitType) != 0)
         m_poGDS->m_bMetadataChanged = true;
 
-    m_osUnitType = osNewValue;
+    m_osUnitType = std::move(osNewValue);
     return CE_None;
 }
 
@@ -479,12 +480,14 @@ CPLErr GTiffRasterBand::SetColorInterpretation(GDALColorInterp eInterp)
         }
     }
 
-    // Mark alpha band / undefined in extrasamples.
-    if (eInterp == GCI_AlphaBand || eInterp == GCI_Undefined)
+    // Mark non-RGB in extrasamples.
+    if (eInterp != GCI_RedBand && eInterp != GCI_GreenBand &&
+        eInterp != GCI_BlueBand)
     {
         uint16_t *v = nullptr;
         uint16_t count = 0;
-        if (TIFFGetField(m_poGDS->m_hTIFF, TIFFTAG_EXTRASAMPLES, &count, &v))
+        if (TIFFGetField(m_poGDS->m_hTIFF, TIFFTAG_EXTRASAMPLES, &count, &v) &&
+            count > 0)
         {
             const int nBaseSamples = m_poGDS->m_nSamplesPerPixel - count;
 
@@ -624,11 +627,7 @@ CPLErr GTiffRasterBand::SetColorTable(GDALColorTable *poCT)
             TIFFUnsetField(m_poGDS->m_hTIFF, TIFFTAG_COLORMAP);
         }
 
-        if (m_poGDS->m_poColorTable)
-        {
-            delete m_poGDS->m_poColorTable;
-            m_poGDS->m_poColorTable = nullptr;
-        }
+        m_poGDS->m_poColorTable.reset();
 
         return CE_None;
     }
@@ -651,6 +650,10 @@ CPLErr GTiffRasterBand::SetColorTable(GDALColorTable *poCT)
         unsigned short *panTBlue = static_cast<unsigned short *>(
             CPLMalloc(sizeof(unsigned short) * nColors));
 
+        if (m_poGDS->m_nColorTableMultiplier == 0)
+            m_poGDS->m_nColorTableMultiplier =
+                GTiffDataset::DEFAULT_COLOR_TABLE_MULTIPLIER_257;
+
         for (int iColor = 0; iColor < nColors; ++iColor)
         {
             if (iColor < poCT->GetColorEntryCount())
@@ -658,9 +661,12 @@ CPLErr GTiffRasterBand::SetColorTable(GDALColorTable *poCT)
                 GDALColorEntry sRGB;
                 poCT->GetColorEntryAsRGB(iColor, &sRGB);
 
-                panTRed[iColor] = static_cast<unsigned short>(257 * sRGB.c1);
-                panTGreen[iColor] = static_cast<unsigned short>(257 * sRGB.c2);
-                panTBlue[iColor] = static_cast<unsigned short>(257 * sRGB.c3);
+                panTRed[iColor] = GTiffDataset::ClampCTEntry(
+                    iColor, 1, sRGB.c1, m_poGDS->m_nColorTableMultiplier);
+                panTGreen[iColor] = GTiffDataset::ClampCTEntry(
+                    iColor, 2, sRGB.c2, m_poGDS->m_nColorTableMultiplier);
+                panTBlue[iColor] = GTiffDataset::ClampCTEntry(
+                    iColor, 3, sRGB.c3, m_poGDS->m_nColorTableMultiplier);
             }
             else
             {
@@ -689,10 +695,7 @@ CPLErr GTiffRasterBand::SetColorTable(GDALColorTable *poCT)
         eErr = GDALPamRasterBand::SetColorTable(poCT);
     }
 
-    if (m_poGDS->m_poColorTable)
-        delete m_poGDS->m_poColorTable;
-
-    m_poGDS->m_poColorTable = poCT->Clone();
+    m_poGDS->m_poColorTable.reset(poCT->Clone());
     m_eBandInterp = GCI_PaletteIndex;
 
     return eErr;
@@ -705,6 +708,33 @@ CPLErr GTiffRasterBand::SetColorTable(GDALColorTable *poCT)
 CPLErr GTiffRasterBand::SetNoDataValue(double dfNoData)
 
 {
+    const auto SetNoDataMembers = [this, dfNoData]()
+    {
+        m_bNoDataSet = true;
+        m_dfNoDataValue = dfNoData;
+
+        m_poGDS->m_bNoDataSet = true;
+        m_poGDS->m_dfNoDataValue = dfNoData;
+
+        if (eDataType == GDT_Int64 && GDALIsValueExactAs<int64_t>(dfNoData))
+        {
+            m_bNoDataSetAsInt64 = true;
+            m_nNoDataValueInt64 = static_cast<int64_t>(dfNoData);
+
+            m_poGDS->m_bNoDataSetAsInt64 = true;
+            m_poGDS->m_nNoDataValueInt64 = static_cast<int64_t>(dfNoData);
+        }
+        else if (eDataType == GDT_UInt64 &&
+                 GDALIsValueExactAs<uint64_t>(dfNoData))
+        {
+            m_bNoDataSetAsUInt64 = true;
+            m_nNoDataValueUInt64 = static_cast<uint64_t>(dfNoData);
+
+            m_poGDS->m_bNoDataSetAsUInt64 = true;
+            m_poGDS->m_nNoDataValueUInt64 = static_cast<uint64_t>(dfNoData);
+        }
+    };
+
     m_poGDS->LoadGeoreferencingAndPamIfNeeded();
 
     if (m_poGDS->m_bNoDataSet &&
@@ -713,8 +743,7 @@ CPLErr GTiffRasterBand::SetNoDataValue(double dfNoData)
     {
         ResetNoDataValues(false);
 
-        m_bNoDataSet = true;
-        m_dfNoDataValue = dfNoData;
+        SetNoDataMembers();
 
         return CE_None;
     }
@@ -729,9 +758,9 @@ CPLErr GTiffRasterBand::SetNoDataValue(double dfNoData)
         {
             ReportError(
                 CE_Warning, CPLE_AppDefined,
-                "Setting nodata to %.18g on band %d, but band %d has nodata "
-                "at %.18g. The TIFFTAG_GDAL_NODATA only support one value "
-                "per dataset. This value of %.18g will be used for all bands "
+                "Setting nodata to %.17g on band %d, but band %d has nodata "
+                "at %.17g. The TIFFTAG_GDAL_NODATA only support one value "
+                "per dataset. This value of %.17g will be used for all bands "
                 "on re-opening",
                 dfNoData, nBand, nOtherBand, dfOtherNoData, dfNoData);
         }
@@ -767,11 +796,7 @@ CPLErr GTiffRasterBand::SetNoDataValue(double dfNoData)
     {
         ResetNoDataValues(true);
 
-        m_poGDS->m_bNoDataSet = true;
-        m_poGDS->m_dfNoDataValue = dfNoData;
-
-        m_bNoDataSet = true;
-        m_dfNoDataValue = dfNoData;
+        SetNoDataMembers();
     }
 
     return eErr;

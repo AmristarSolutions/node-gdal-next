@@ -7,30 +7,16 @@
  ******************************************************************************
  * Copyright (c) 2011-2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_string.h"
+#include "cpl_vsi_virtual.h"
 #include "gdal_frmts.h"
 #include "gdal_pam.h"
 
 #include "webp_headers.h"
+#include "webpdrivercore.h"
 
 #include <limits>
 
@@ -54,17 +40,27 @@ class WEBPDataset final : public GDALPamDataset
 
     int bHasReadXMPMetadata;
 
+    CPL_DISALLOW_COPY_ASSIGN(WEBPDataset)
+
+    CPLErr GetGeoTransform(GDALGeoTransform &gt,
+                           std::string &osWorldFilename) const;
+
   public:
     WEBPDataset();
-    virtual ~WEBPDataset();
+    ~WEBPDataset() override;
 
-    virtual CPLErr IRasterIO(GDALRWFlag, int, int, int, int, void *, int, int,
-                             GDALDataType, int, int *, GSpacing nPixelSpace,
-                             GSpacing nLineSpace, GSpacing nBandSpace,
-                             GDALRasterIOExtraArg *psExtraArg) override;
+    CPLErr Close() override;
 
-    virtual char **GetMetadataDomainList() override;
-    virtual char **GetMetadata(const char *pszDomain = "") override;
+    char **GetFileList() override;
+
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
+    CPLErr IRasterIO(GDALRWFlag, int, int, int, int, void *, int, int,
+                     GDALDataType, int, BANDMAP_TYPE, GSpacing nPixelSpace,
+                     GSpacing nLineSpace, GSpacing nBandSpace,
+                     GDALRasterIOExtraArg *psExtraArg) override;
+
+    char **GetMetadataDomainList() override;
+    char **GetMetadata(const char *pszDomain = "") override;
 
     CPLStringList GetCompressionFormats(int nXOff, int nYOff, int nXSize,
                                         int nYSize, int nBandCount,
@@ -77,7 +73,6 @@ class WEBPDataset final : public GDALPamDataset
 
     static GDALPamDataset *OpenPAM(GDALOpenInfo *poOpenInfo);
     static GDALDataset *Open(GDALOpenInfo *);
-    static int Identify(GDALOpenInfo *);
     static GDALDataset *CreateCopy(const char *pszFilename,
                                    GDALDataset *poSrcDS, int bStrict,
                                    char **papszOptions,
@@ -98,8 +93,8 @@ class WEBPRasterBand final : public GDALPamRasterBand
   public:
     WEBPRasterBand(WEBPDataset *, int);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual GDALColorInterp GetColorInterpretation() override;
+    CPLErr IReadBlock(int, int, void *) override;
+    GDALColorInterp GetColorInterpretation() override;
 };
 
 /************************************************************************/
@@ -123,7 +118,7 @@ WEBPRasterBand::WEBPRasterBand(WEBPDataset *poDSIn, int)
 CPLErr WEBPRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
                                   void *pImage)
 {
-    WEBPDataset *poGDS = reinterpret_cast<WEBPDataset *>(poDS);
+    WEBPDataset *poGDS = cpl::down_cast<WEBPDataset *>(poDS);
 
     if (poGDS->Uncompress() != CE_None)
         return CE_Failure;
@@ -180,10 +175,77 @@ WEBPDataset::WEBPDataset()
 WEBPDataset::~WEBPDataset()
 
 {
-    FlushCache(true);
-    if (fpImage)
-        VSIFCloseL(fpImage);
+    WEBPDataset::Close();
     VSIFree(pabyUncompressed);
+}
+
+/************************************************************************/
+/*                                Close()                               */
+/************************************************************************/
+
+CPLErr WEBPDataset::Close()
+{
+    CPLErr eErr = CE_None;
+
+    if (nOpenFlags != OPEN_FLAGS_CLOSED)
+    {
+        eErr = WEBPDataset::FlushCache(true);
+
+        if (fpImage != nullptr && VSIFCloseL(fpImage) != 0)
+            eErr = CE_Failure;
+        fpImage = nullptr;
+
+        eErr = GDAL::Combine(eErr, GDALPamDataset::Close());
+    }
+    return eErr;
+}
+
+/************************************************************************/
+/*                               GetFileList()                          */
+/************************************************************************/
+
+char **WEBPDataset::GetFileList()
+{
+    char **papszFileList = GDALPamDataset::GetFileList();
+    GDALGeoTransform gt;
+    std::string osWorldFilename;
+    CPL_IGNORE_RET_VAL(GetGeoTransform(gt, osWorldFilename));
+    if (!osWorldFilename.empty())
+    {
+        papszFileList = CSLAddString(papszFileList, osWorldFilename.c_str());
+    }
+    return papszFileList;
+}
+
+/************************************************************************/
+/*                            GetGeoTransform()                         */
+/************************************************************************/
+
+CPLErr WEBPDataset::GetGeoTransform(GDALGeoTransform &gt) const
+{
+    std::string osWorldFilename;
+    return GetGeoTransform(gt, osWorldFilename);
+}
+
+CPLErr WEBPDataset::GetGeoTransform(GDALGeoTransform &gt,
+                                    std::string &osWorldFilename) const
+{
+    bool bGeoTransformValid = GDALPamDataset::GetGeoTransform(gt) == CE_None;
+    if (!bGeoTransformValid)
+    {
+        char *pszWldFilename = nullptr;
+        bGeoTransformValid =
+            GDALReadWorldFile2(GetDescription(), ".wld", gt,
+                               oOvManager.GetSiblingFiles(), &pszWldFilename) ||
+            GDALReadWorldFile2(GetDescription(), ".wpw", gt,
+                               oOvManager.GetSiblingFiles(), &pszWldFilename) ||
+            GDALReadWorldFile2(GetDescription(), ".webpw", gt,
+                               oOvManager.GetSiblingFiles(), &pszWldFilename);
+        if (bGeoTransformValid)
+            osWorldFilename = pszWldFilename;
+        CPLFree(pszWldFilename);
+    }
+    return bGeoTransformValid ? CE_None : CE_Failure;
 }
 
 /************************************************************************/
@@ -262,6 +324,7 @@ char **WEBPDataset::GetMetadata(const char *pszDomain)
                 char *apszMDList[2] = {pszXMP, nullptr};
                 SetMetadata(apszMDList, "xml:XMP");
 
+                // cppcheck-suppress redundantAssignment
                 nPamFlags = nOldPamFlags;
 
                 VSIFree(pszXMP);
@@ -316,12 +379,14 @@ CPLErr WEBPDataset::Uncompress()
     if (nBands == 4)
         pRet = WebPDecodeRGBAInto(pabyCompressed, static_cast<uint32_t>(nSize),
                                   static_cast<uint8_t *>(pabyUncompressed),
-                                  nRasterXSize * nRasterYSize * nBands,
+                                  static_cast<size_t>(nRasterXSize) *
+                                      nRasterYSize * nBands,
                                   nRasterXSize * nBands);
     else
         pRet = WebPDecodeRGBInto(pabyCompressed, static_cast<uint32_t>(nSize),
                                  static_cast<uint8_t *>(pabyUncompressed),
-                                 nRasterXSize * nRasterYSize * nBands,
+                                 static_cast<size_t>(nRasterXSize) *
+                                     nRasterYSize * nBands,
                                  nRasterXSize * nBands);
 
     VSIFree(pabyCompressed);
@@ -343,7 +408,7 @@ CPLErr WEBPDataset::IRasterIO(GDALRWFlag eRWFlag, int nXOff, int nYOff,
                               int nXSize, int nYSize, void *pData,
                               int nBufXSize, int nBufYSize,
                               GDALDataType eBufType, int nBandCount,
-                              int *panBandMap, GSpacing nPixelSpace,
+                              BANDMAP_TYPE panBandMap, GSpacing nPixelSpace,
                               GSpacing nLineSpace, GSpacing nBandSpace,
                               GDALRasterIOExtraArg *psExtraArg)
 
@@ -351,16 +416,16 @@ CPLErr WEBPDataset::IRasterIO(GDALRWFlag eRWFlag, int nXOff, int nYOff,
     if ((eRWFlag == GF_Read) && (nBandCount == nBands) && (nXOff == 0) &&
         (nYOff == 0) && (nXSize == nBufXSize) && (nXSize == nRasterXSize) &&
         (nYSize == nBufYSize) && (nYSize == nRasterYSize) &&
-        (eBufType == GDT_Byte) && (pData != nullptr) && (panBandMap[0] == 1) &&
-        (panBandMap[1] == 2) && (panBandMap[2] == 3) &&
-        (nBands == 3 || panBandMap[3] == 4))
+        (eBufType == GDT_Byte) && (pData != nullptr) &&
+        IsAllBands(nBandCount, panBandMap))
     {
         if (Uncompress() != CE_None)
             return CE_Failure;
         if (nPixelSpace == nBands && nLineSpace == (nPixelSpace * nXSize) &&
             nBandSpace == 1)
         {
-            memcpy(pData, pabyUncompressed, nBands * nXSize * nYSize);
+            memcpy(pData, pabyUncompressed,
+                   static_cast<size_t>(nBands) * nXSize * nYSize);
         }
         else
         {
@@ -510,34 +575,13 @@ CPLErr WEBPDataset::ReadCompressedData(const char *pszFormat, int nXOff,
 }
 
 /************************************************************************/
-/*                              Identify()                              */
-/************************************************************************/
-
-int WEBPDataset::Identify(GDALOpenInfo *poOpenInfo)
-
-{
-    int nHeaderBytes = poOpenInfo->nHeaderBytes;
-
-    GByte *pabyHeader = poOpenInfo->pabyHeader;
-
-    if (nHeaderBytes < 20)
-        return FALSE;
-
-    return memcmp(pabyHeader, "RIFF", 4) == 0 &&
-           memcmp(pabyHeader + 8, "WEBP", 4) == 0 &&
-           (memcmp(pabyHeader + 12, "VP8 ", 4) == 0 ||
-            memcmp(pabyHeader + 12, "VP8L", 4) == 0 ||
-            memcmp(pabyHeader + 12, "VP8X", 4) == 0);
-}
-
-/************************************************************************/
 /*                          OpenPAM()                                   */
 /************************************************************************/
 
 GDALPamDataset *WEBPDataset::OpenPAM(GDALOpenInfo *poOpenInfo)
 
 {
-    if (!Identify(poOpenInfo) || poOpenInfo->fpL == nullptr)
+    if (!WEBPDriverIdentify(poOpenInfo) || poOpenInfo->fpL == nullptr)
         return nullptr;
 
     int nWidth, nHeight;
@@ -548,7 +592,7 @@ GDALPamDataset *WEBPDataset::OpenPAM(GDALOpenInfo *poOpenInfo)
 
     int nBands = 3;
 
-    auto poDS = cpl::make_unique<WEBPDataset>();
+    auto poDS = std::make_unique<WEBPDataset>();
 
 #if WEBP_DECODER_ABI_VERSION >= 0x0002
     WebPDecoderConfig config;
@@ -567,7 +611,9 @@ GDALPamDataset *WEBPDataset::OpenPAM(GDALOpenInfo *poOpenInfo)
         config.input.format == 2 ? "LOSSLESS" : "LOSSY", "IMAGE_STRUCTURE");
 #endif
 
-    if (config.input.has_alpha)
+    if (config.input.has_alpha ||
+        CPLTestBool(CSLFetchNameValueDef(poOpenInfo->papszOpenOptions,
+                                         "FORCE_4BANDS", "NO")))
         nBands = 4;
 
     WebPFreeDecBuffer(&config.output);
@@ -579,9 +625,7 @@ GDALPamDataset *WEBPDataset::OpenPAM(GDALOpenInfo *poOpenInfo)
 
     if (poOpenInfo->eAccess == GA_Update)
     {
-        CPLError(CE_Failure, CPLE_NotSupported,
-                 "The WEBP driver does not support update access to existing"
-                 " datasets.\n");
+        ReportUpdateNotSupportedByDriver("WEBP");
         return nullptr;
     }
 
@@ -727,7 +771,14 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
 
             if (!abyData.empty())
             {
-                VSILFILE *fpImage = VSIFOpenL(pszFilename, "wb");
+                auto fpImage(
+                    CPLTestBool(CSLFetchNameValueDef(
+                        papszOptions, "@CREATE_ONLY_VISIBLE_AT_CLOSE_TIME",
+                        "NO"))
+                        ? VSIFileManager::GetHandler(pszFilename)
+                              ->CreateOnlyVisibleAtCloseTime(pszFilename, true,
+                                                             nullptr)
+                        : VSIFilesystemHandler::OpenStatic(pszFilename, "wb"));
                 if (fpImage == nullptr)
                 {
                     CPLError(CE_Failure, CPLE_OpenFailed,
@@ -735,18 +786,20 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
 
                     return nullptr;
                 }
-                if (VSIFWriteL(abyData.data(), 1, abyData.size(), fpImage) !=
+                if (fpImage->Write(abyData.data(), 1, abyData.size()) !=
                     abyData.size())
                 {
                     CPLError(CE_Failure, CPLE_FileIO,
                              "Failure writing data: %s", VSIStrerror(errno));
-                    VSIFCloseL(fpImage);
+                    fpImage->CancelCreation();
                     return nullptr;
                 }
-                if (VSIFCloseL(fpImage) != 0)
+
+                if (fpImage->Close() != 0)
                 {
                     CPLError(CE_Failure, CPLE_FileIO,
-                             "Failure writing data: %s", VSIStrerror(errno));
+                             "Error at file closing of '%s': %s", pszFilename,
+                             VSIStrerror(errno));
                     return nullptr;
                 }
 
@@ -941,7 +994,7 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
     /*      Allocate memory                                                 */
     /* -------------------------------------------------------------------- */
     GByte *pabyBuffer =
-        reinterpret_cast<GByte *>(VSIMalloc(nBands * nXSize * nYSize));
+        static_cast<GByte *>(VSI_MALLOC3_VERBOSE(nBands, nXSize, nYSize));
     if (pabyBuffer == nullptr)
     {
         return nullptr;
@@ -950,7 +1003,12 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
     /* -------------------------------------------------------------------- */
     /*      Create the dataset.                                             */
     /* -------------------------------------------------------------------- */
-    VSILFILE *fpImage = VSIFOpenL(pszFilename, "wb");
+    auto fpImage(
+        CPLTestBool(CSLFetchNameValueDef(
+            papszOptions, "@CREATE_ONLY_VISIBLE_AT_CLOSE_TIME", "NO"))
+            ? VSIFileManager::GetHandler(pszFilename)
+                  ->CreateOnlyVisibleAtCloseTime(pszFilename, true, nullptr)
+            : VSIFilesystemHandler::OpenStatic(pszFilename, "wb"));
     if (fpImage == nullptr)
     {
         CPLError(CE_Failure, CPLE_OpenFailed,
@@ -960,7 +1018,7 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
     }
 
     WebPUserData sUserData;
-    sUserData.fp = fpImage;
+    sUserData.fp = fpImage.get();
     sUserData.pfnProgress = pfnProgress ? pfnProgress : GDALDummyProgress;
     sUserData.pProgressData = pProgressData;
 
@@ -979,16 +1037,17 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
     {
         CPLError(CE_Failure, CPLE_AppDefined, "WebPPictureAlloc() failed");
         VSIFree(pabyBuffer);
-        VSIFCloseL(fpImage);
+        fpImage->CancelCreation();
         return nullptr;
     }
 
     /* -------------------------------------------------------------------- */
     /*      Acquire source imagery.                                         */
     /* -------------------------------------------------------------------- */
-    CPLErr eErr = poSrcDS->RasterIO(GF_Read, 0, 0, nXSize, nYSize, pabyBuffer,
-                                    nXSize, nYSize, GDT_Byte, nBands, nullptr,
-                                    nBands, nBands * nXSize, 1, nullptr);
+    CPLErr eErr =
+        poSrcDS->RasterIO(GF_Read, 0, 0, nXSize, nYSize, pabyBuffer, nXSize,
+                          nYSize, GDT_Byte, nBands, nullptr, nBands,
+                          static_cast<GSpacing>(nBands) * nXSize, 1, nullptr);
 
 /* -------------------------------------------------------------------- */
 /*      Import and write to file                                        */
@@ -1011,6 +1070,9 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
         CPLError(CE_Failure, CPLE_AppDefined, "WebPPictureImportRGB() failed");
         eErr = CE_Failure;
     }
+
+    if (pfnProgress)
+        pfnProgress(0.5, "", pProgressData);
 
     if (eErr == CE_None && !WebPEncode(&sConfig, &sPicture))
     {
@@ -1071,7 +1133,21 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
 
     WebPPictureFree(&sPicture);
 
-    VSIFCloseL(fpImage);
+    if (eErr == CE_None)
+    {
+        if (fpImage->Close() != 0)
+        {
+            CPLError(CE_Failure, CPLE_FileIO,
+                     "Error at file closing of '%s': %s", pszFilename,
+                     VSIStrerror(errno));
+            eErr = CE_Failure;
+        }
+    }
+    else
+    {
+        fpImage->CancelCreation();
+        fpImage.reset();
+    }
 
     if (pfnProgress)
         pfnProgress(1.0, "", pProgressData);
@@ -1080,6 +1156,14 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
     {
         VSIUnlink(pszFilename);
         return nullptr;
+    }
+
+    // Do we need a world file?
+    if (CPLFetchBool(papszOptions, "WORLDFILE", false))
+    {
+        GDALGeoTransform gt;
+        poSrcDS->GetGeoTransform(gt);
+        GDALWriteWorldFile(pszFilename, "wld", gt.data());
     }
 
     /* -------------------------------------------------------------------- */
@@ -1108,81 +1192,12 @@ GDALDataset *WEBPDataset::CreateCopy(const char *pszFilename,
 void GDALRegister_WEBP()
 
 {
-    if (GDALGetDriverByName("WEBP") != nullptr)
+    if (GDALGetDriverByName(DRIVER_NAME) != nullptr)
         return;
 
     GDALDriver *poDriver = new GDALDriver();
+    WEBPDriverSetCommonMetadata(poDriver);
 
-    poDriver->SetDescription("WEBP");
-    poDriver->SetMetadataItem(GDAL_DCAP_RASTER, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_LONGNAME, "WEBP");
-    poDriver->SetMetadataItem(GDAL_DMD_HELPTOPIC, "drivers/raster/webp.html");
-    poDriver->SetMetadataItem(GDAL_DMD_EXTENSION, "webp");
-    poDriver->SetMetadataItem(GDAL_DMD_MIMETYPE, "image/webp");
-    poDriver->SetMetadataItem(GDAL_DMD_CREATIONDATATYPES, "Byte");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_CREATIONOPTIONLIST,
-        "<CreationOptionList>\n"
-        "   <Option name='QUALITY' type='float' description='good=100, bad=0' "
-        "default='75'/>\n"
-#if WEBP_ENCODER_ABI_VERSION >= 0x0100
-        "   <Option name='LOSSLESS' type='boolean' description='Whether "
-        "lossless compression should be used' default='FALSE'/>\n"
-#endif
-        "   <Option name='LOSSLESS_COPY' type='string-select' "
-        "description='Whether conversion should be lossless' default='AUTO'>"
-        "     <Value>AUTO</Value>"
-        "     <Value>YES</Value>"
-        "     <Value>NO</Value>"
-        "   </Option>"
-        "   <Option name='PRESET' type='string-select' description='kind of "
-        "image' default='DEFAULT'>\n"
-        "       <Value>DEFAULT</Value>\n"
-        "       <Value>PICTURE</Value>\n"
-        "       <Value>PHOTO</Value>\n"
-        "       <Value>DRAWING</Value>\n"
-        "       <Value>ICON</Value>\n"
-        "       <Value>TEXT</Value>\n"
-        "   </Option>\n"
-        "   <Option name='TARGETSIZE' type='int' description='if non-zero, "
-        "desired target size in bytes. Has precedence over QUALITY'/>\n"
-        "   <Option name='PSNR' type='float' description='if non-zero, minimal "
-        "distortion to to achieve. Has precedence over TARGETSIZE'/>\n"
-        "   <Option name='METHOD' type='int' description='quality/speed "
-        "trade-off. fast=0, slower-better=6' default='4'/>\n"
-        "   <Option name='SEGMENTS' type='int' description='maximum number of "
-        "segments [1-4]' default='4'/>\n"
-        "   <Option name='SNS_STRENGTH' type='int' description='Spatial Noise "
-        "Shaping. off=0, maximum=100' default='50'/>\n"
-        "   <Option name='FILTER_STRENGTH' type='int' description='Filter "
-        "strength. off=0, strongest=100' default='20'/>\n"
-        "   <Option name='FILTER_SHARPNESS' type='int' description='Filter "
-        "sharpness. off=0, least sharp=7' default='0'/>\n"
-        "   <Option name='FILTER_TYPE' type='int' description='Filtering type. "
-        "simple=0, strong=1' default='0'/>\n"
-        "   <Option name='AUTOFILTER' type='int' description=\"Auto adjust "
-        "filter's strength. off=0, on=1\" default='0'/>\n"
-        "   <Option name='PASS' type='int' description='Number of entropy "
-        "analysis passes [1-10]' default='1'/>\n"
-        "   <Option name='PREPROCESSING' type='int' description='Preprocessing "
-        "filter. none=0, segment-smooth=1' default='0'/>\n"
-        "   <Option name='PARTITIONS' type='int' description='log2(number of "
-        "token partitions) in [0..3]' default='0'/>\n"
-#if WEBP_ENCODER_ABI_VERSION >= 0x0002
-        "   <Option name='PARTITION_LIMIT' type='int' description='quality "
-        "degradation allowed to fit the 512k limit on prediction modes coding "
-        "(0=no degradation, 100=full)' default='0'/>\n"
-#endif
-#if WEBP_ENCODER_ABI_VERSION >= 0x0209
-        "   <Option name='EXACT' type='int' description='preserve the exact "
-        "RGB values under transparent area. off=0, on=1' default='0'/>\n"
-#endif
-        "</CreationOptionList>\n");
-
-    poDriver->SetMetadataItem(GDAL_DCAP_VIRTUALIO, "YES");
-
-    poDriver->pfnIdentify = WEBPDataset::Identify;
     poDriver->pfnOpen = WEBPDataset::Open;
     poDriver->pfnCreateCopy = WEBPDataset::CreateCopy;
 

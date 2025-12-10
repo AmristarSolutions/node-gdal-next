@@ -1,5 +1,4 @@
 /******************************************************************************
- * $Id$
  *
  * Project:  GDAL/OGR Geography Network support (Geographic Network Model)
  * Purpose:  GNM file based generic driver.
@@ -29,6 +28,9 @@
  * DEALINGS IN THE SOFTWARE.
  ****************************************************************************/
 
+#ifndef GNMFILE_H_INCLUDED
+#define GNMFILE_H_INCLUDED
+
 #include "gnm.h"
 
 #define GNM_MD_DEFAULT_FILE_FORMAT "ESRI Shapefile"
@@ -37,20 +39,19 @@ class GNMFileNetwork : public GNMGenericNetwork
 {
   public:
     GNMFileNetwork();
-    virtual ~GNMFileNetwork();
-    virtual CPLErr Open(GDALOpenInfo *poOpenInfo) override;
-    virtual CPLErr Delete() override;
-    virtual int CloseDependentDatasets() override;
-    virtual OGRErr DeleteLayer(int) override;
+    ~GNMFileNetwork() override;
+    CPLErr Open(GDALOpenInfo *poOpenInfo) override;
+    CPLErr Delete() override;
+    int CloseDependentDatasets() override;
+    OGRErr DeleteLayer(int) override;
     virtual CPLErr Create(const char *pszFilename,
                           char **papszOptions) override;
 
   protected:
-    virtual OGRLayer *
-    ICreateLayer(const char *pszName,
-                 const OGRSpatialReference *poSpatialRef = nullptr,
-                 OGRwkbGeometryType eGType = wkbUnknown,
-                 char **papszOptions = nullptr) override;
+    OGRLayer *ICreateLayer(const char *pszName,
+                           const OGRGeomFieldDefn *poGeomFieldDefn,
+                           CSLConstList papszOptions) override;
+
     virtual int CheckNetworkExist(const char *pszFilename,
                                   char **papszOptions) override;
 
@@ -58,18 +59,18 @@ class GNMFileNetwork : public GNMGenericNetwork
     virtual CPLErr CreateMetadataLayerFromFile(const char *pszFilename,
                                                int nVersion,
                                                char **papszOptions);
-    virtual CPLErr StoreNetworkSrs() override;
-    virtual CPLErr LoadNetworkSrs() override;
-    virtual CPLErr DeleteMetadataLayer() override;
+    CPLErr StoreNetworkSrs() override;
+    CPLErr LoadNetworkSrs() override;
+    CPLErr DeleteMetadataLayer() override;
     virtual CPLErr CreateGraphLayerFromFile(const char *pszFilename,
                                             char **papszOptions);
-    virtual CPLErr DeleteGraphLayer() override;
+    CPLErr DeleteGraphLayer() override;
     virtual CPLErr CreateFeaturesLayerFromFile(const char *pszFilename,
                                                char **papszOptions);
-    virtual CPLErr DeleteFeaturesLayer() override;
-    virtual CPLErr DeleteNetworkLayers() override;
-    virtual CPLErr LoadNetworkLayer(const char *pszLayername) override;
-    virtual bool CheckStorageDriverSupport(const char *pszDriverName) override;
+    CPLErr DeleteFeaturesLayer() override;
+    CPLErr DeleteNetworkLayers() override;
+    CPLErr LoadNetworkLayer(const char *pszLayername) override;
+    bool CheckStorageDriverSupport(const char *pszDriverName) override;
 
   protected:
     CPLErr FormPath(const char *pszFilename, char **papszOptions);
@@ -81,3 +82,5 @@ class GNMFileNetwork : public GNMGenericNetwork
     GDALDataset *m_pFeaturesDS;
     std::map<OGRLayer *, GDALDataset *> m_mpLayerDatasetMap;
 };
+
+#endif

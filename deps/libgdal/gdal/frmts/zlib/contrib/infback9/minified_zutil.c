@@ -3,7 +3,6 @@
  * For conditions of distribution and use, see copyright notice in zlib.h
  */
 
-/* @(#) $Id$ */
 
 #include "minified_zutil.h"
 
@@ -12,7 +11,7 @@
 voidpf ZLIB_INTERNAL zcalloc(voidpf opaque, unsigned items, unsigned size)
 {
     (void)opaque;
-    return sizeof(uInt) > 2 ? (voidpf)malloc(items * size) :
+    return sizeof(uInt) > 2 ? (voidpf)malloc((size_t)items * size) :
                               (voidpf)calloc(items, size);
 }
 

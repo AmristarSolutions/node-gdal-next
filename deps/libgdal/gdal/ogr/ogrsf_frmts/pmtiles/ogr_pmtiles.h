@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2023, Planet Labs
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef OGR_PMTILES_H_INCLUDED
@@ -64,20 +48,23 @@ class OGRPMTilesDataset final : public GDALDataset
 
     bool Open(GDALOpenInfo *poOpenInfo);
 
-    int GetLayerCount() override
+    int GetLayerCount() const override
     {
         return static_cast<int>(m_apoLayers.size());
     }
-    OGRLayer *GetLayer(int) override;
+
+    const OGRLayer *GetLayer(int) const override;
 
     inline int GetMinZoomLevel() const
     {
         return m_nMinZoomLevel;
     }
+
     inline int GetMaxZoomLevel() const
     {
         return m_nMaxZoomLevel;
     }
+
     inline const pmtiles::headerv3 &GetHeader() const
     {
         return m_sHeader;
@@ -91,10 +78,12 @@ class OGRPMTilesDataset final : public GDALDataset
     {
         return m_osMetadata;
     }
+
     inline const std::string &GetMetadataFilename() const
     {
         return m_osMetadataFilename;
     }
+
     inline const std::string &GetClipOpenOption() const
     {
         return m_osClipOpenOption;
@@ -103,7 +92,8 @@ class OGRPMTilesDataset final : public GDALDataset
     /** Return a short-lived decompressed buffer for metadata or directory
      * entries or nullptr in case of error.
      */
-    const std::string *ReadInternal(uint64_t nOffset, uint64_t nSize);
+    const std::string *ReadInternal(uint64_t nOffset, uint64_t nSize,
+                                    const char *pszDataType);
 
     /** Return a short-lived decompressed buffer for tile data.
      *  or nullptr in case of error.
@@ -148,7 +138,8 @@ class OGRPMTilesDataset final : public GDALDataset
     /** Return a short-lived decompressed buffer, or nullptr in case of error
      */
     const std::string *Read(const CPLCompressor *psDecompressor,
-                            uint64_t nOffset, uint64_t nSize);
+                            uint64_t nOffset, uint64_t nSize,
+                            const char *pszDataType);
 
     CPL_DISALLOW_COPY_ASSIGN(OGRPMTilesDataset)
 };
@@ -252,30 +243,25 @@ class OGRPMTilesVectorLayer final
                           double dfMaxX, double dfMaxY,
                           OGRwkbGeometryType eGeomType, int nZoomLevel,
                           bool bZoomLevelFromSpatialFilter);
-    ~OGRPMTilesVectorLayer();
+    ~OGRPMTilesVectorLayer() override;
 
     void ResetReading() override;
 
     OGRFeature *GetNextRawFeature();
     DEFINE_GET_NEXT_FEATURE_THROUGH_RAW(OGRPMTilesVectorLayer)
 
-    OGRFeatureDefn *GetLayerDefn() override
+    const OGRFeatureDefn *GetLayerDefn() const override
     {
         return m_poFeatureDefn;
     }
-    int TestCapability(const char *) override;
 
-    OGRErr GetExtent(OGREnvelope *psExtent, int bForce) override;
-    OGRErr GetExtent(int iGeomField, OGREnvelope *psExtent, int bForce) override
-    {
-        return OGRLayer::GetExtent(iGeomField, psExtent, bForce);
-    }
+    int TestCapability(const char *) const override;
 
-    void SetSpatialFilter(OGRGeometry *) override;
-    void SetSpatialFilter(int iGeomField, OGRGeometry *poGeom) override
-    {
-        OGRLayer::SetSpatialFilter(iGeomField, poGeom);
-    }
+    OGRErr IGetExtent(int iGeomField, OGREnvelope *psExtent,
+                      bool bForce) override;
+
+    OGRErr ISetSpatialFilter(int iGeomField,
+                             const OGRGeometry *poGeom) override;
 
     GIntBig GetFeatureCount(int bForce) override;
 
@@ -366,10 +352,11 @@ class OGRPMTilesWriterDataset final : public GDALDataset
 
     CPLErr Close() override;
 
-    OGRLayer *ICreateLayer(const char *, const OGRSpatialReference *,
-                           OGRwkbGeometryType, char **) override;
+    OGRLayer *ICreateLayer(const char *pszName,
+                           const OGRGeomFieldDefn *poGeomFieldDefn,
+                           CSLConstList papszOptions) override;
 
-    int TestCapability(const char *) override;
+    int TestCapability(const char *) const override;
 };
 
 #endif  // HAVE_MVT_WRITE_SUPPORT

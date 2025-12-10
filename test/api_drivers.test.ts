@@ -1,13 +1,8 @@
-import * as chaiAsPromised from 'chai-as-promised'
-import * as chai from 'chai'
-const assert = chai.assert
+import { assert } from 'chai'
 import * as gdal from 'gdal-async'
 
-chai.use(chaiAsPromised)
-
 describe('gdal.drivers', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('count()', () => {
     it('should return the number of drivers', () => {
@@ -58,7 +53,7 @@ describe('gdal.drivers', () => {
         DCAP_CREATE: 'YES'
       },
       MEM: {
-        DMD_LONGNAME: 'In Memory Raster',
+        DMD_LONGNAME: 'In Memory',
         DMD_MIMETYPE: undefined,
         DMD_EXTENSION: undefined,
         DCAP_CREATE: 'YES'
@@ -84,7 +79,7 @@ describe('gdal.drivers', () => {
 
         const metadata = driver.getMetadata() as driverMeta
         const expected_meta = expected[o]
-        assert.equal(expected_meta.DMD_LONGNAME, metadata.DMD_LONGNAME)
+        assert.include(metadata.DMD_LONGNAME, expected_meta.DMD_LONGNAME)
         assert.equal(expected_meta.DMD_MIMETYPE, metadata.DMD_MIMETYPE)
         assert.equal(expected_meta.DMD_EXTENSION, metadata.DMD_EXTENSION)
         assert.equal(expected_meta.DCAP_CREATE, metadata.DCAP_CREATE)
@@ -189,8 +184,8 @@ describe('gdal.drivers', () => {
     it('should throw if the driver-specific options are invalid', () => {
       assert.throws(() => {
         const driver = gdal.drivers.get('GTiff')
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        driver.open(`${__dirname}/data/sample.tif`, 'r', 'GEOREF_SOURCES=NONE' as any)
+        // @ts-expect-error voluntary error
+        driver.open(`${__dirname}/data/sample.tif`, 'r', 'GEOREF_SOURCES=NONE')
       }, /Failed parsing options/)
     })
   })
@@ -262,8 +257,8 @@ describe('gdal.drivers', () => {
         driver.createCopy(
           outputFilename,
           gdal.open(`${__dirname}/data/12_791_1476.jpg`),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          'option=invalid' as any
+          // @ts-expect-error voluntary error
+          'option=invalid'
         )
       }, /Failed parsing options/)
     })

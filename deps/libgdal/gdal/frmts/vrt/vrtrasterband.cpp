@@ -8,28 +8,13 @@
  * Copyright (c) 2001, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2008-2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
 #include "vrtdataset.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -38,6 +23,7 @@
 #include <vector>
 
 #include "gdal.h"
+#include "gdalantirecursion.h"
 #include "gdal_pam.h"
 #include "gdal_priv.h"
 #include "cpl_conv.h"
@@ -47,6 +33,7 @@
 #include "cpl_progress.h"
 #include "cpl_string.h"
 #include "cpl_vsi.h"
+#include "vrt_priv.h"
 
 /*! @cond Doxygen_Suppress */
 
@@ -88,17 +75,7 @@ void VRTRasterBand::Initialize(int nXSize, int nYSize)
 /*                           ~VRTRasterBand()                           */
 /************************************************************************/
 
-VRTRasterBand::~VRTRasterBand()
-
-{
-    CPLFree(m_pszUnitType);
-
-    CSLDestroy(m_papszCategoryNames);
-    if (m_psSavedHistograms != nullptr)
-        CPLDestroyXMLNode(m_psSavedHistograms);
-
-    delete m_poMaskBand;
-}
+VRTRasterBand::~VRTRasterBand() = default;
 
 /************************************************************************/
 /*                         CopyCommonInfoFrom()                         */
@@ -152,7 +129,7 @@ CPLErr VRTRasterBand::CopyCommonInfoFrom(GDALRasterBand *poSrcBand)
 CPLErr VRTRasterBand::SetMetadata(char **papszMetadata, const char *pszDomain)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return GDALRasterBand::SetMetadata(papszMetadata, pszDomain);
 }
@@ -165,7 +142,7 @@ CPLErr VRTRasterBand::SetMetadataItem(const char *pszName, const char *pszValue,
                                       const char *pszDomain)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     if (EQUAL(pszName, "HideNoDataValue"))
     {
@@ -183,10 +160,7 @@ CPLErr VRTRasterBand::SetMetadataItem(const char *pszName, const char *pszValue,
 const char *VRTRasterBand::GetUnitType()
 
 {
-    if (m_pszUnitType == nullptr)
-        return "";
-
-    return m_pszUnitType;
+    return m_osUnitType.c_str();
 }
 
 /************************************************************************/
@@ -196,14 +170,9 @@ const char *VRTRasterBand::GetUnitType()
 CPLErr VRTRasterBand::SetUnitType(const char *pszNewValue)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
-    CPLFree(m_pszUnitType);
-
-    if (pszNewValue == nullptr)
-        m_pszUnitType = nullptr;
-    else
-        m_pszUnitType = CPLStrdup(pszNewValue);
+    m_osUnitType = pszNewValue ? pszNewValue : "";
 
     return CE_None;
 }
@@ -228,7 +197,7 @@ double VRTRasterBand::GetOffset(int *pbSuccess)
 CPLErr VRTRasterBand::SetOffset(double dfNewOffset)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     m_dfOffset = dfNewOffset;
     return CE_None;
@@ -254,7 +223,7 @@ double VRTRasterBand::GetScale(int *pbSuccess)
 CPLErr VRTRasterBand::SetScale(double dfNewScale)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     m_dfScale = dfNewScale;
     return CE_None;
@@ -267,7 +236,7 @@ CPLErr VRTRasterBand::SetScale(double dfNewScale)
 char **VRTRasterBand::GetCategoryNames()
 
 {
-    return m_papszCategoryNames;
+    return m_aosCategoryNames.List();
 }
 
 /************************************************************************/
@@ -277,21 +246,73 @@ char **VRTRasterBand::GetCategoryNames()
 CPLErr VRTRasterBand::SetCategoryNames(char **papszNewNames)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
-    CSLDestroy(m_papszCategoryNames);
-    m_papszCategoryNames = CSLDuplicate(papszNewNames);
+    m_aosCategoryNames = CSLDuplicate(papszNewNames);
 
     return CE_None;
+}
+
+/************************************************************************/
+/*                        VRTParseCategoryNames()                       */
+/************************************************************************/
+
+CPLStringList VRTParseCategoryNames(const CPLXMLNode *psCategoryNames)
+{
+    CPLStringList oCategoryNames;
+
+    for (const CPLXMLNode *psEntry = psCategoryNames->psChild;
+         psEntry != nullptr; psEntry = psEntry->psNext)
+    {
+        if (psEntry->eType != CXT_Element ||
+            !EQUAL(psEntry->pszValue, "Category") ||
+            (psEntry->psChild != nullptr &&
+             psEntry->psChild->eType != CXT_Text))
+            continue;
+
+        oCategoryNames.AddString((psEntry->psChild) ? psEntry->psChild->pszValue
+                                                    : "");
+    }
+
+    return oCategoryNames;
+}
+
+/************************************************************************/
+/*                          VRTParseColorTable()                        */
+/************************************************************************/
+
+std::unique_ptr<GDALColorTable>
+VRTParseColorTable(const CPLXMLNode *psColorTable)
+{
+    auto poColorTable = std::make_unique<GDALColorTable>();
+    int iEntry = 0;
+
+    for (const CPLXMLNode *psEntry = psColorTable->psChild; psEntry != nullptr;
+         psEntry = psEntry->psNext)
+    {
+        if (psEntry->eType != CXT_Element || !EQUAL(psEntry->pszValue, "Entry"))
+        {
+            continue;
+        }
+
+        const GDALColorEntry sCEntry = {
+            static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c1", "0"))),
+            static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c2", "0"))),
+            static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c3", "0"))),
+            static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c4", "255")))};
+
+        poColorTable->SetColorEntry(iEntry++, &sCEntry);
+    }
+
+    return poColorTable;
 }
 
 /************************************************************************/
 /*                              XMLInit()                               */
 /************************************************************************/
 
-CPLErr
-VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
-                       std::map<CPLString, GDALDataset *> &oMapSharedSources)
+CPLErr VRTRasterBand::XMLInit(const CPLXMLNode *psTree, const char *pszVRTPath,
+                              VRTMapSharedResources &oMapSharedSources)
 
 {
     /* -------------------------------------------------------------------- */
@@ -399,86 +420,47 @@ VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
     /* -------------------------------------------------------------------- */
     /*      Category names.                                                 */
     /* -------------------------------------------------------------------- */
-    if (CPLGetXMLNode(psTree, "CategoryNames") != nullptr)
+    if (const CPLXMLNode *psCategoryNames =
+            CPLGetXMLNode(psTree, "CategoryNames"))
     {
-        CSLDestroy(m_papszCategoryNames);
-        m_papszCategoryNames = nullptr;
-
-        CPLStringList oCategoryNames;
-
-        for (CPLXMLNode *psEntry =
-                 CPLGetXMLNode(psTree, "CategoryNames")->psChild;
-             psEntry != nullptr; psEntry = psEntry->psNext)
-        {
-            if (psEntry->eType != CXT_Element ||
-                !EQUAL(psEntry->pszValue, "Category") ||
-                (psEntry->psChild != nullptr &&
-                 psEntry->psChild->eType != CXT_Text))
-                continue;
-
-            oCategoryNames.AddString(
-                (psEntry->psChild) ? psEntry->psChild->pszValue : "");
-        }
-
-        m_papszCategoryNames = oCategoryNames.StealList();
+        m_aosCategoryNames = VRTParseCategoryNames(psCategoryNames);
     }
 
     /* -------------------------------------------------------------------- */
     /*      Collect a color table.                                          */
     /* -------------------------------------------------------------------- */
-    if (CPLGetXMLNode(psTree, "ColorTable") != nullptr)
+    if (const CPLXMLNode *psColorTable = CPLGetXMLNode(psTree, "ColorTable"))
     {
-        GDALColorTable oTable;
-        int iEntry = 0;
-
-        for (CPLXMLNode *psEntry = CPLGetXMLNode(psTree, "ColorTable")->psChild;
-             psEntry != nullptr; psEntry = psEntry->psNext)
-        {
-            if (psEntry->eType != CXT_Element ||
-                !EQUAL(psEntry->pszValue, "Entry"))
-            {
-                continue;
-            }
-
-            const GDALColorEntry sCEntry = {
-                static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c1", "0"))),
-                static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c2", "0"))),
-                static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c3", "0"))),
-                static_cast<short>(atoi(CPLGetXMLValue(psEntry, "c4", "255")))};
-
-            oTable.SetColorEntry(iEntry++, &sCEntry);
-        }
-
-        SetColorTable(&oTable);
+        auto poColorTable = VRTParseColorTable(psColorTable);
+        if (poColorTable)
+            SetColorTable(poColorTable.get());
     }
 
     /* -------------------------------------------------------------------- */
     /*      Raster Attribute Table                                          */
     /* -------------------------------------------------------------------- */
-    CPLXMLNode *psRAT = CPLGetXMLNode(psTree, "GDALRasterAttributeTable");
-    if (psRAT != nullptr)
+    if (const CPLXMLNode *psRAT =
+            CPLGetXMLNode(psTree, "GDALRasterAttributeTable"))
     {
-        m_poRAT.reset(new GDALDefaultRasterAttributeTable());
+        m_poRAT = std::make_unique<GDALDefaultRasterAttributeTable>();
         m_poRAT->XMLInit(psRAT, "");
     }
 
     /* -------------------------------------------------------------------- */
     /*      Histograms                                                      */
     /* -------------------------------------------------------------------- */
-    CPLXMLNode *psHist = CPLGetXMLNode(psTree, "Histograms");
+    const CPLXMLNode *psHist = CPLGetXMLNode(psTree, "Histograms");
     if (psHist != nullptr)
     {
-        CPLXMLNode *psNext = psHist->psNext;
-        psHist->psNext = nullptr;
-
-        m_psSavedHistograms = CPLCloneXMLTree(psHist);
-        psHist->psNext = psNext;
+        CPLXMLNode sHistTemp = *psHist;
+        sHistTemp.psNext = nullptr;
+        m_psSavedHistograms.reset(CPLCloneXMLTree(&sHistTemp));
     }
 
     /* ==================================================================== */
     /*      Overviews                                                       */
     /* ==================================================================== */
-    CPLXMLNode *psNode = psTree->psChild;
+    const CPLXMLNode *psNode = psTree->psChild;
 
     for (; psNode != nullptr; psNode = psNode->psNext)
     {
@@ -491,7 +473,8 @@ VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
         /*      Prepare filename. */
         /* --------------------------------------------------------------------
          */
-        CPLXMLNode *psFileNameNode = CPLGetXMLNode(psNode, "SourceFilename");
+        const CPLXMLNode *psFileNameNode =
+            CPLGetXMLNode(psNode, "SourceFilename");
         const char *pszFilename =
             psFileNameNode ? CPLGetXMLValue(psFileNameNode, nullptr, nullptr)
                            : nullptr;
@@ -518,8 +501,9 @@ VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
         if (pszVRTPath != nullptr &&
             atoi(CPLGetXMLValue(psFileNameNode, "relativetoVRT", "0")))
         {
-            pszSrcDSName =
-                CPLStrdup(CPLProjectRelativeFilename(pszVRTPath, pszFilename));
+            pszSrcDSName = CPLStrdup(
+                CPLProjectRelativeFilenameSafe(pszVRTPath, pszFilename)
+                    .c_str());
         }
         else
             pszSrcDSName = CPLStrdup(pszFilename);
@@ -541,7 +525,7 @@ VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
     /* ==================================================================== */
     /*      Mask band (specific to that raster band)                        */
     /* ==================================================================== */
-    CPLXMLNode *psMaskBandNode = CPLGetXMLNode(psTree, "MaskBand");
+    const CPLXMLNode *psMaskBandNode = CPLGetXMLNode(psTree, "MaskBand");
     if (psMaskBandNode)
         psNode = psMaskBandNode->psChild;
     else
@@ -552,41 +536,54 @@ VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
             !EQUAL(psNode->pszValue, "VRTRasterBand"))
             continue;
 
-        if (static_cast<VRTDataset *>(poDS)->m_poMaskBand != nullptr)
+        if (cpl::down_cast<VRTDataset *>(poDS)->m_poMaskBand != nullptr)
         {
             CPLError(CE_Warning, CPLE_AppDefined,
                      "Illegal mask band at raster band level when a dataset "
                      "mask band already exists.");
-            break;
+            return CE_Failure;
         }
 
         const char *pszSubclass =
             CPLGetXMLValue(psNode, "subclass", "VRTSourcedRasterBand");
-        VRTRasterBand *poBand = nullptr;
+        std::unique_ptr<VRTRasterBand> poBand;
 
         if (EQUAL(pszSubclass, "VRTSourcedRasterBand"))
-            poBand = new VRTSourcedRasterBand(GetDataset(), 0);
+            poBand = std::make_unique<VRTSourcedRasterBand>(GetDataset(), 0);
         else if (EQUAL(pszSubclass, "VRTDerivedRasterBand"))
-            poBand = new VRTDerivedRasterBand(GetDataset(), 0);
+            poBand = std::make_unique<VRTDerivedRasterBand>(GetDataset(), 0);
         else if (EQUAL(pszSubclass, "VRTRawRasterBand"))
-            poBand = new VRTRawRasterBand(GetDataset(), 0);
+        {
+#ifdef GDAL_VRT_ENABLE_RAWRASTERBAND
+            if (!VRTDataset::IsRawRasterBandEnabled())
+            {
+                return CE_Failure;
+            }
+            poBand = std::make_unique<VRTRawRasterBand>(GetDataset(), 0);
+#else
+            CPLError(CE_Failure, CPLE_NotSupported,
+                     "VRTRasterBand::XMLInit(): cannot instantiate "
+                     "VRTRawRasterBand, because disabled in this GDAL build");
+            return CE_Failure;
+#endif
+        }
         else if (EQUAL(pszSubclass, "VRTWarpedRasterBand"))
-            poBand = new VRTWarpedRasterBand(GetDataset(), 0);
+            poBand = std::make_unique<VRTWarpedRasterBand>(GetDataset(), 0);
         else
         {
             CPLError(CE_Failure, CPLE_AppDefined,
                      "VRTRasterBand of unrecognized subclass '%s'.",
                      pszSubclass);
-            break;
+            return CE_Failure;
         }
 
         if (poBand->XMLInit(psNode, pszVRTPath, oMapSharedSources) == CE_None)
         {
-            SetMaskBand(poBand);
+            SetMaskBand(std::move(poBand));
         }
         else
         {
-            delete poBand;
+            return CE_Failure;
         }
 
         break;
@@ -602,18 +599,28 @@ VRTRasterBand::XMLInit(CPLXMLNode *psTree, const char *pszVRTPath,
 CPLString VRTSerializeNoData(double dfVal, GDALDataType eDataType,
                              int nPrecision)
 {
-    if (CPLIsNan(dfVal))
+    if (std::isnan(dfVal))
     {
         return "nan";
     }
+    else if (eDataType == GDT_Float16 && dfVal == -6.55e4)
+    {
+        // To avoid rounding out of the range of GFloat16
+        return "-6.55e4";
+    }
+    else if (eDataType == GDT_Float16 && dfVal == 6.55e4)
+    {
+        // To avoid rounding out of the range of GFloat16
+        return "6.55e4";
+    }
     else if (eDataType == GDT_Float32 &&
-             dfVal == -std::numeric_limits<float>::max())
+             dfVal == -static_cast<double>(std::numeric_limits<float>::max()))
     {
         // To avoid rounding out of the range of float
         return "-3.4028234663852886e+38";
     }
     else if (eDataType == GDT_Float32 &&
-             dfVal == std::numeric_limits<float>::max())
+             dfVal == static_cast<double>(std::numeric_limits<float>::max()))
     {
         // To avoid rounding out of the range of float
         return "3.4028234663852886e+38";
@@ -630,7 +637,9 @@ CPLString VRTSerializeNoData(double dfVal, GDALDataType eDataType,
 /*                           SerializeToXML()                           */
 /************************************************************************/
 
-CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
+CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath,
+                                          bool &bHasWarnedAboutRAMUsage,
+                                          size_t &nAccRAMUsage)
 
 {
     CPLXMLNode *psTree =
@@ -649,15 +658,17 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
     // serialized at the dataset level.
     if (dynamic_cast<VRTWarpedRasterBand *>(this) == nullptr)
     {
-        if (nBlockXSize != 128 &&
-            !(nBlockXSize < 128 && nBlockXSize == nRasterXSize))
+        if (!VRTDataset::IsDefaultBlockSize(nBlockXSize, nRasterXSize))
+        {
             CPLSetXMLValue(psTree, "#blockXSize",
                            CPLSPrintf("%d", nBlockXSize));
+        }
 
-        if (nBlockYSize != 128 &&
-            !(nBlockYSize < 128 && nBlockYSize == nRasterYSize))
+        if (!VRTDataset::IsDefaultBlockSize(nBlockYSize, nRasterYSize))
+        {
             CPLSetXMLValue(psTree, "#blockYSize",
                            CPLSPrintf("%d", nBlockYSize));
+        }
     }
 
     CPLXMLNode *psMD = oMDMD.Serialize();
@@ -690,10 +701,10 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
 
     if (m_bHideNoDataValue)
         CPLSetXMLValue(psTree, "HideNoDataValue",
-                       CPLSPrintf("%d", m_bHideNoDataValue));
+                       CPLSPrintf("%d", static_cast<int>(m_bHideNoDataValue)));
 
-    if (m_pszUnitType != nullptr)
-        CPLSetXMLValue(psTree, "UnitType", m_pszUnitType);
+    if (!m_osUnitType.empty())
+        CPLSetXMLValue(psTree, "UnitType", m_osUnitType.c_str());
 
     if (m_dfOffset != 0.0)
         CPLSetXMLValue(psTree, "Offset", CPLSPrintf("%.16g", m_dfOffset));
@@ -708,16 +719,16 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
     /* -------------------------------------------------------------------- */
     /*      Category names.                                                 */
     /* -------------------------------------------------------------------- */
-    if (m_papszCategoryNames != nullptr)
+    if (!m_aosCategoryNames.empty())
     {
         CPLXMLNode *psCT_XML =
             CPLCreateXMLNode(psTree, CXT_Element, "CategoryNames");
         CPLXMLNode *psLastChild = nullptr;
 
-        for (int iEntry = 0; m_papszCategoryNames[iEntry] != nullptr; iEntry++)
+        for (const char *pszName : m_aosCategoryNames)
         {
-            CPLXMLNode *psNode = CPLCreateXMLElementAndValue(
-                nullptr, "Category", m_papszCategoryNames[iEntry]);
+            CPLXMLNode *psNode =
+                CPLCreateXMLElementAndValue(nullptr, "Category", pszName);
             if (psLastChild == nullptr)
                 psCT_XML->psChild = psNode;
             else
@@ -730,7 +741,7 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
     /*      Histograms.                                                     */
     /* -------------------------------------------------------------------- */
     if (m_psSavedHistograms != nullptr)
-        CPLAddXMLChild(psTree, CPLCloneXMLTree(m_psSavedHistograms));
+        CPLAddXMLChild(psTree, CPLCloneXMLTree(m_psSavedHistograms.get()));
 
     /* -------------------------------------------------------------------- */
     /*      Color Table.                                                    */
@@ -776,8 +787,7 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
     /*      Overviews                                                       */
     /* ==================================================================== */
 
-    for (int iOvr = 0; iOvr < static_cast<int>(m_aoOverviewInfos.size());
-         iOvr++)
+    for (const auto &ovrInfo : m_aoOverviewInfos)
     {
         CPLXMLNode *psOVR_XML =
             CPLCreateXMLNode(psTree, CXT_Element, "Overview");
@@ -786,17 +796,15 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
         const char *pszRelativePath = nullptr;
         VSIStatBufL sStat;
 
-        if (VSIStatExL(m_aoOverviewInfos[iOvr].osFilename, &sStat,
-                       VSI_STAT_EXISTS_FLAG) != 0)
+        if (VSIStatExL(ovrInfo.osFilename, &sStat, VSI_STAT_EXISTS_FLAG) != 0)
         {
-            pszRelativePath = m_aoOverviewInfos[iOvr].osFilename;
+            pszRelativePath = ovrInfo.osFilename;
             bRelativeToVRT = FALSE;
         }
         else
         {
             pszRelativePath = CPLExtractRelativePath(
-                pszVRTPath, m_aoOverviewInfos[iOvr].osFilename,
-                &bRelativeToVRT);
+                pszVRTPath, ovrInfo.osFilename, &bRelativeToVRT);
         }
 
         CPLSetXMLValue(psOVR_XML, "SourceFilename", pszRelativePath);
@@ -807,16 +815,19 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
             CXT_Text, bRelativeToVRT ? "1" : "0");
 
         CPLSetXMLValue(psOVR_XML, "SourceBand",
-                       CPLSPrintf("%d", m_aoOverviewInfos[iOvr].nBand));
+                       CPLSPrintf("%d", ovrInfo.nBand));
     }
 
     /* ==================================================================== */
     /*      Mask band (specific to that raster band)                        */
     /* ==================================================================== */
 
+    nAccRAMUsage += CPLXMLNodeGetRAMUsageEstimate(psTree);
+
     if (m_poMaskBand != nullptr)
     {
-        CPLXMLNode *psBandTree = m_poMaskBand->SerializeToXML(pszVRTPath);
+        CPLXMLNode *psBandTree = m_poMaskBand->SerializeToXML(
+            pszVRTPath, bHasWarnedAboutRAMUsage, nAccRAMUsage);
 
         if (psBandTree != nullptr)
         {
@@ -835,7 +846,7 @@ CPLXMLNode *VRTRasterBand::SerializeToXML(const char *pszVRTPath)
 
 void VRTRasterBand::ResetNoDataValues()
 {
-    m_bNoDataValueSet = FALSE;
+    m_bNoDataValueSet = false;
     m_dfNoDataValue = VRT_DEFAULT_NODATA_VALUE;
 
     m_bNoDataSetAsInt64 = false;
@@ -859,10 +870,10 @@ CPLErr VRTRasterBand::SetNoDataValue(double dfNewValue)
 
     ResetNoDataValues();
 
-    m_bNoDataValueSet = TRUE;
+    m_bNoDataValueSet = true;
     m_dfNoDataValue = dfNewValue;
 
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return CE_None;
 }
@@ -880,7 +891,8 @@ bool VRTRasterBand::IsNoDataValueInDataTypeRange() const
     if (!m_bNoDataValueSet)
         return true;
     if (!std::isfinite(m_dfNoDataValue))
-        return eDataType == GDT_Float32 || eDataType == GDT_Float64;
+        return eDataType == GDT_Float16 || eDataType == GDT_Float32 ||
+               eDataType == GDT_Float64;
     GByte abyTempBuffer[2 * sizeof(double)];
     CPLAssert(GDALGetDataTypeSizeBytes(eDataType) <=
               static_cast<int>(sizeof(abyTempBuffer)));
@@ -904,7 +916,7 @@ CPLErr VRTRasterBand::SetNoDataValueAsInt64(int64_t nNewValue)
     m_bNoDataSetAsInt64 = true;
     m_nNoDataValueInt64 = nNewValue;
 
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return CE_None;
 }
@@ -921,7 +933,7 @@ CPLErr VRTRasterBand::SetNoDataValueAsUInt64(uint64_t nNewValue)
     m_bNoDataSetAsUInt64 = true;
     m_nNoDataValueUInt64 = nNewValue;
 
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return CE_None;
 }
@@ -934,10 +946,11 @@ CPLErr VRTRasterBand::DeleteNoDataValue()
 {
     ResetNoDataValues();
 
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return CE_None;
 }
+
 /************************************************************************/
 /*                         UnsetNoDataValue()                           */
 /************************************************************************/
@@ -1049,7 +1062,7 @@ CPLErr VRTRasterBand::SetColorTable(GDALColorTable *poTableIn)
         m_eColorInterp = GCI_PaletteIndex;
     }
 
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return CE_None;
 }
@@ -1071,7 +1084,7 @@ GDALColorTable *VRTRasterBand::GetColorTable()
 CPLErr VRTRasterBand::SetColorInterpretation(GDALColorInterp eInterpIn)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     m_eColorInterp = eInterpIn;
 
@@ -1098,7 +1111,7 @@ CPLErr VRTRasterBand::SetDefaultRAT(const GDALRasterAttributeTable *poRAT)
     else
         m_poRAT.reset(poRAT->Clone());
 
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     return CE_None;
 }
@@ -1128,8 +1141,8 @@ CPLErr VRTRasterBand::GetHistogram(double dfMin, double dfMax, int nBuckets,
     /*      Check if we have a matching histogram.                          */
     /* -------------------------------------------------------------------- */
     CPLXMLNode *psHistItem =
-        PamFindMatchingHistogram(m_psSavedHistograms, dfMin, dfMax, nBuckets,
-                                 bIncludeOutOfRange, bApproxOK);
+        PamFindMatchingHistogram(m_psSavedHistograms.get(), dfMin, dfMax,
+                                 nBuckets, bIncludeOutOfRange, bApproxOK);
     if (psHistItem != nullptr)
     {
         GUIntBig *panTempHist = nullptr;
@@ -1161,13 +1174,13 @@ CPLErr VRTRasterBand::GetHistogram(double dfMin, double dfMax, int nBuckets,
                                   bIncludeOutOfRange, bApproxOK);
         if (psXMLHist != nullptr)
         {
-            static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+            cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
             if (m_psSavedHistograms == nullptr)
-                m_psSavedHistograms =
-                    CPLCreateXMLNode(nullptr, CXT_Element, "Histograms");
+                m_psSavedHistograms.reset(
+                    CPLCreateXMLNode(nullptr, CXT_Element, "Histograms"));
 
-            CPLAddXMLChild(m_psSavedHistograms, psXMLHist);
+            CPLAddXMLChild(m_psSavedHistograms.get(), psXMLHist);
         }
     }
 
@@ -1185,12 +1198,12 @@ CPLErr VRTRasterBand::SetDefaultHistogram(double dfMin, double dfMax,
     /* -------------------------------------------------------------------- */
     /*      Do we have a matching histogram we should replace?              */
     /* -------------------------------------------------------------------- */
-    CPLXMLNode *psNode = PamFindMatchingHistogram(m_psSavedHistograms, dfMin,
-                                                  dfMax, nBuckets, TRUE, TRUE);
+    CPLXMLNode *psNode = PamFindMatchingHistogram(
+        m_psSavedHistograms.get(), dfMin, dfMax, nBuckets, TRUE, TRUE);
     if (psNode != nullptr)
     {
         /* blow this one away */
-        CPLRemoveXMLChild(m_psSavedHistograms, psNode);
+        CPLRemoveXMLChild(m_psSavedHistograms.get(), psNode);
         CPLDestroyXMLNode(psNode);
     }
 
@@ -1206,11 +1219,11 @@ CPLErr VRTRasterBand::SetDefaultHistogram(double dfMin, double dfMax,
     /*      Insert our new default histogram at the front of the            */
     /*      histogram list so that it will be the default histogram.        */
     /* -------------------------------------------------------------------- */
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     if (m_psSavedHistograms == nullptr)
-        m_psSavedHistograms =
-            CPLCreateXMLNode(nullptr, CXT_Element, "Histograms");
+        m_psSavedHistograms.reset(
+            CPLCreateXMLNode(nullptr, CXT_Element, "Histograms"));
 
     psHistItem->psNext = m_psSavedHistograms->psChild;
     m_psSavedHistograms->psChild = psHistItem;
@@ -1403,7 +1416,7 @@ GDALRasterBand *VRTRasterBand::GetOverview(int iOverview)
         return poRet;
 
     // If not found, implicit virtual overviews
-    VRTDataset *poVRTDS = static_cast<VRTDataset *>(poDS);
+    VRTDataset *poVRTDS = cpl::down_cast<VRTDataset *>(poDS);
     poVRTDS->BuildVirtualOverviews();
     if (!poVRTDS->m_apoOverviews.empty() && poVRTDS->m_apoOverviews[0])
     {
@@ -1428,7 +1441,7 @@ GDALRasterBand *VRTRasterBand::GetOverview(int iOverview)
 void VRTRasterBand::SetDescription(const char *pszDescription)
 
 {
-    static_cast<VRTDataset *>(poDS)->SetNeedsFlush();
+    cpl::down_cast<VRTDataset *>(poDS)->SetNeedsFlush();
 
     GDALRasterBand::SetDescription(pszDescription);
 }
@@ -1439,7 +1452,7 @@ void VRTRasterBand::SetDescription(const char *pszDescription)
 
 CPLErr VRTRasterBand::CreateMaskBand(int nFlagsIn)
 {
-    VRTDataset *poGDS = static_cast<VRTDataset *>(poDS);
+    VRTDataset *poGDS = cpl::down_cast<VRTDataset *>(poDS);
 
     if (poGDS->m_poMaskBand)
     {
@@ -1459,7 +1472,7 @@ CPLErr VRTRasterBand::CreateMaskBand(int nFlagsIn)
     if ((nFlagsIn & GMF_PER_DATASET) != 0)
         return poGDS->CreateMaskBand(nFlagsIn);
 
-    SetMaskBand(new VRTSourcedRasterBand(poGDS, 0));
+    SetMaskBand(std::make_unique<VRTSourcedRasterBand>(poGDS, 0));
 
     return CE_None;
 }
@@ -1470,12 +1483,12 @@ CPLErr VRTRasterBand::CreateMaskBand(int nFlagsIn)
 
 GDALRasterBand *VRTRasterBand::GetMaskBand()
 {
-    VRTDataset *poGDS = static_cast<VRTDataset *>(poDS);
+    VRTDataset *poGDS = cpl::down_cast<VRTDataset *>(poDS);
 
     if (poGDS->m_poMaskBand)
-        return poGDS->m_poMaskBand;
+        return poGDS->m_poMaskBand.get();
     else if (m_poMaskBand)
-        return m_poMaskBand;
+        return m_poMaskBand.get();
     else
         return GDALRasterBand::GetMaskBand();
 }
@@ -1486,7 +1499,7 @@ GDALRasterBand *VRTRasterBand::GetMaskBand()
 
 int VRTRasterBand::GetMaskFlags()
 {
-    VRTDataset *poGDS = static_cast<VRTDataset *>(poDS);
+    VRTDataset *poGDS = cpl::down_cast<VRTDataset *>(poDS);
 
     if (poGDS->m_poMaskBand)
         return GMF_PER_DATASET;
@@ -1500,10 +1513,9 @@ int VRTRasterBand::GetMaskFlags()
 /*                           SetMaskBand()                              */
 /************************************************************************/
 
-void VRTRasterBand::SetMaskBand(VRTRasterBand *poMaskBandIn)
+void VRTRasterBand::SetMaskBand(std::unique_ptr<VRTRasterBand> poMaskBand)
 {
-    delete m_poMaskBand;
-    m_poMaskBand = poMaskBandIn;
+    m_poMaskBand = std::move(poMaskBand);
     m_poMaskBand->SetIsMaskBand();
 }
 
@@ -1514,7 +1526,7 @@ void VRTRasterBand::SetMaskBand(VRTRasterBand *poMaskBandIn)
 void VRTRasterBand::SetIsMaskBand()
 {
     nBand = 0;
-    m_bIsMaskBand = TRUE;
+    m_bIsMaskBand = true;
 }
 
 /************************************************************************/

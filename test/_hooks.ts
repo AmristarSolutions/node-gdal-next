@@ -1,5 +1,9 @@
-import * as gdal from 'gdal-async'
+import gdal from 'gdal-async'
 import * as os from 'os'
+
+import * as chai from 'chai'
+import chaiAsPromised from 'chai-as-promised'
+chai.use(chaiAsPromised)
 
 let noFailNet = function (this: Mocha.Context) {
   let test: Mocha.Suite | Mocha.Test | undefined = this.currentTest
@@ -47,9 +51,8 @@ const bundledSkip = function (this: Mocha.Context) {
 }
 
 const cleanup = () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  delete (gdal as any).drivers
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  // @ts-expect-error not a public API
+  delete gdal.drivers
   global.gc!()
 }
 

@@ -8,28 +8,13 @@
  * Copyright (c) 1998, 2002, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2007-2015, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "gtiffjpegoverviewds.h"
 
 #include "gtiffdataset.h"
+#include "gdal_priv.h"
 
 #include "tifvsi.h"
 
@@ -43,11 +28,9 @@ class GTiffJPEGOverviewBand final : public GDALRasterBand
 {
   public:
     GTiffJPEGOverviewBand(GTiffJPEGOverviewDS *poDS, int nBand);
-    virtual ~GTiffJPEGOverviewBand()
-    {
-    }
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
+    CPLErr IReadBlock(int, int, void *) override;
+
     GDALColorInterp GetColorInterpretation() override
     {
         return cpl::down_cast<GTiffJPEGOverviewDS *>(poDS)
@@ -69,7 +52,7 @@ GTiffJPEGOverviewDS::GTiffJPEGOverviewDS(GTiffDataset *poParentDSIn,
 {
     ShareLockWithParentDataset(poParentDSIn);
 
-    m_osTmpFilenameJPEGTable.Printf("/vsimem/jpegtable_%p", this);
+    m_osTmpFilenameJPEGTable = VSIMemGenerateHiddenFilename("jpegtable");
 
     const GByte abyAdobeAPP14RGB[] = {0xFF, 0xEE, 0x00, 0x0E, 0x41, 0x64,
                                       0x6F, 0x62, 0x65, 0x00, 0x64, 0x00,
@@ -91,10 +74,8 @@ GTiffJPEGOverviewDS::GTiffJPEGOverviewDS(GTiffDataset *poParentDSIn,
         m_osTmpFilenameJPEGTable, m_pabyJPEGTable, m_nJPEGTableSize, TRUE)));
 
     const int nScaleFactor = 1 << m_nOverviewLevel;
-    nRasterXSize =
-        (m_poParentDS->nRasterXSize + nScaleFactor - 1) / nScaleFactor;
-    nRasterYSize =
-        (m_poParentDS->nRasterYSize + nScaleFactor - 1) / nScaleFactor;
+    nRasterXSize = DIV_ROUND_UP(m_poParentDS->nRasterXSize, nScaleFactor);
+    nRasterYSize = DIV_ROUND_UP(m_poParentDS->nRasterYSize, nScaleFactor);
 
     for (int i = 1; i <= m_poParentDS->nBands; ++i)
         SetBand(i, new GTiffJPEGOverviewBand(this, i));
@@ -122,13 +103,11 @@ GTiffJPEGOverviewDS::~GTiffJPEGOverviewDS()
 /*                            IRasterIO()                               */
 /************************************************************************/
 
-CPLErr GTiffJPEGOverviewDS::IRasterIO(GDALRWFlag eRWFlag, int nXOff, int nYOff,
-                                      int nXSize, int nYSize, void *pData,
-                                      int nBufXSize, int nBufYSize,
-                                      GDALDataType eBufType, int nBandCount,
-                                      int *panBandMap, GSpacing nPixelSpace,
-                                      GSpacing nLineSpace, GSpacing nBandSpace,
-                                      GDALRasterIOExtraArg *psExtraArg)
+CPLErr GTiffJPEGOverviewDS::IRasterIO(
+    GDALRWFlag eRWFlag, int nXOff, int nYOff, int nXSize, int nYSize,
+    void *pData, int nBufXSize, int nBufYSize, GDALDataType eBufType,
+    int nBandCount, BANDMAP_TYPE panBandMap, GSpacing nPixelSpace,
+    GSpacing nLineSpace, GSpacing nBandSpace, GDALRasterIOExtraArg *psExtraArg)
 
 {
     // For non-single strip JPEG-IN-TIFF, the block based strategy will
@@ -165,8 +144,8 @@ GTiffJPEGOverviewBand::GTiffJPEGOverviewBand(GTiffJPEGOverviewDS *poDSIn,
     poDSIn->m_poParentDS->GetRasterBand(nBandIn)->GetBlockSize(&nBlockXSize,
                                                                &nBlockYSize);
     const int nScaleFactor = 1 << poDSIn->m_nOverviewLevel;
-    nBlockXSize = (nBlockXSize + nScaleFactor - 1) / nScaleFactor;
-    nBlockYSize = (nBlockYSize + nScaleFactor - 1) / nScaleFactor;
+    nBlockXSize = DIV_ROUND_UP(nBlockXSize, nScaleFactor);
+    nBlockYSize = DIV_ROUND_UP(nBlockYSize, nScaleFactor);
 }
 
 /************************************************************************/
@@ -221,7 +200,7 @@ CPLErr GTiffJPEGOverviewBand::IReadBlock(int nBlockXOff, int nBlockYOff,
         nByteCount -= 2;
 
         CPLString osFileToOpen;
-        m_poGDS->m_osTmpFilename.Printf("/vsimem/sparse_%p", m_poGDS);
+        m_poGDS->m_osTmpFilename = VSIMemGenerateHiddenFilename("sparse");
         VSILFILE *fp = VSIFOpenL(m_poGDS->m_osTmpFilename, "wb+");
 
         // If the size of the JPEG strip/tile is small enough, we will

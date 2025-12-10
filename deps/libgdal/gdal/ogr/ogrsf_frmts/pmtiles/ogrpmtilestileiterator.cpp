@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2023, Planet Labs
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_pmtiles.h"
@@ -125,7 +109,8 @@ bool OGRPMTilesTileIterator::LoadRootDirectory()
 
     const auto &sHeader = m_poDS->GetHeader();
     const auto *posStr = m_poDS->ReadInternal(
-        sHeader.root_dir_offset, static_cast<uint32_t>(sHeader.root_dir_bytes));
+        sHeader.root_dir_offset, static_cast<uint32_t>(sHeader.root_dir_bytes),
+        "header");
     if (!posStr)
     {
         return false;
@@ -291,6 +276,7 @@ pmtiles::entry_zxy OGRPMTilesTileIterator::GetNextTile(uint32_t *pnRunLength)
                 // by pmtiles.hpp::get_tile()
                 if (m_aoStack.size() == 5)
                 {
+                    m_bEOF = true;
                     CPLError(CE_Failure, CPLE_AppDefined,
                              "Too many levels of nested directories");
                     break;
@@ -299,15 +285,25 @@ pmtiles::entry_zxy OGRPMTilesTileIterator::GetNextTile(uint32_t *pnRunLength)
                 if (sHeader.leaf_dirs_offset >
                     std::numeric_limits<uint64_t>::max() - sCurrentEntry.offset)
                 {
+                    m_bEOF = true;
                     CPLError(CE_Failure, CPLE_AppDefined,
                              "Invalid directory offset");
                     break;
                 }
                 const auto *posStr = m_poDS->ReadInternal(
                     sHeader.leaf_dirs_offset + sCurrentEntry.offset,
-                    sCurrentEntry.length);
+                    sCurrentEntry.length, "directory");
                 if (!posStr)
                 {
+                    m_bEOF = true;
+                    CPLError(
+                        CE_Failure, CPLE_AppDefined,
+                        "PMTILES: cannot read directory of size " CPL_FRMT_GUIB
+                        " at "
+                        "offset " CPL_FRMT_GUIB,
+                        static_cast<GUIntBig>(sHeader.leaf_dirs_offset +
+                                              sCurrentEntry.offset),
+                        static_cast<GUIntBig>(sCurrentEntry.length));
                     break;
                 }
 
@@ -315,6 +311,7 @@ pmtiles::entry_zxy OGRPMTilesTileIterator::GetNextTile(uint32_t *pnRunLength)
                 sContext.sEntries = pmtiles::deserialize_directory(*posStr);
                 if (sContext.sEntries.empty())
                 {
+                    m_bEOF = true;
                     // In theory empty directories could exist, but for now
                     // do not allow this to be more robust against hostile files
                     // that could create many such empty directories
@@ -326,6 +323,7 @@ pmtiles::entry_zxy OGRPMTilesTileIterator::GetNextTile(uint32_t *pnRunLength)
                 if (m_nLastTileId != INVALID_LAST_TILE_ID &&
                     sContext.sEntries[0].tile_id <= m_nLastTileId)
                 {
+                    m_bEOF = true;
                     CPLError(CE_Failure, CPLE_AppDefined,
                              "Non increasing tile_id");
                     break;
@@ -371,6 +369,7 @@ pmtiles::entry_zxy OGRPMTilesTileIterator::GetNextTile(uint32_t *pnRunLength)
                         sCurrentEntry.run_length >
                             pmtiles::zxy_to_tileid(zxy.z + 1, 0, 0) - nTileId)
                     {
+                        m_bEOF = true;
                         CPLError(CE_Failure, CPLE_AppDefined,
                                  "Invalid run_length");
                         break;
@@ -428,6 +427,7 @@ pmtiles::entry_zxy OGRPMTilesTileIterator::GetNextTile(uint32_t *pnRunLength)
                         std::numeric_limits<uint64_t>::max() -
                             sCurrentEntry.offset)
                     {
+                        m_bEOF = true;
                         CPLError(CE_Failure, CPLE_AppDefined,
                                  "Invalid tile offset");
                         break;

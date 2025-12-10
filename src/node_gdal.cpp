@@ -21,6 +21,7 @@
 #include "gdal_attribute.hpp"
 #include "gdal_warper.hpp"
 #include "gdal_utils.hpp"
+#include "gdal_algebra.hpp"
 
 #include "gdal_coordinate_transformation.hpp"
 #include "gdal_feature.hpp"
@@ -214,12 +215,21 @@ GDAL_ASYNCABLE_DEFINE(gdal_open) {
       } else {
         flags |= GDAL_OF_READONLY;
       }
-#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 1)
     } else if (mode[i] == 'm') {
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 1)
       flags |= GDAL_OF_MULTIDIM_RASTER;
+#else
+      Nan::ThrowError("Multidimensional support requires GDAL 3.1");
+#endif
+    } else if (mode[i] == 't') {
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 10)
+      flags |= GDAL_OF_THREAD_SAFE | GDAL_OF_RASTER;
+#else
+      Nan::ThrowError("Thread-safe read-only reading requires GDAL 3.10");
+      return;
 #endif
     } else {
-      Nan::ThrowError("Invalid open mode. Must contain only \"r\" or \"r+\" and \"m\" ");
+      Nan::ThrowError("Invalid open mode. Must contain only \"r\" or \"r+\" and \"m\" or \"t\" ");
       return;
     }
   }
@@ -353,6 +363,9 @@ static void Init(Local<Object> target, Local<v8::Value>, void *) {
 
   Warper::Initialize(target);
   Algorithms::Initialize(target);
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 12)
+  Algebra::Initialize(target);
+#endif
 
   Driver::Initialize(target);
   Dataset::Initialize(target);
@@ -889,6 +902,35 @@ static void Init(Local<Object> target, Local<v8::Value>, void *) {
    * @type {string}
    */
   Nan::Set(target, Nan::New("GDT_Int32").ToLocalChecked(), Nan::New(GDALGetDataTypeName(GDT_Int32)).ToLocalChecked());
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 5)
+  /**
+   * Sixty four bit signed integer
+   * @final
+   * @constant
+   * @name GDT_Int64
+   * @type {string}
+   */
+  Nan::Set(target, Nan::New("GDT_Int64").ToLocalChecked(), Nan::New(GDALGetDataTypeName(GDT_Int64)).ToLocalChecked());
+  /**
+   * Sixty four bit unsigned integer
+   * @final
+   * @constant
+   * @name GDT_UInt64
+   * @type {string}
+   */
+  Nan::Set(target, Nan::New("GDT_UInt64").ToLocalChecked(), Nan::New(GDALGetDataTypeName(GDT_UInt64)).ToLocalChecked());
+#endif
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 11)
+  /**
+   * Sixteen bit floating point
+   * @final
+   * @constant
+   * @name GDT_Float16
+   * @type {string}
+   */
+  Nan::Set(
+    target, Nan::New("GDT_Float16").ToLocalChecked(), Nan::New(GDALGetDataTypeName(GDT_Float16)).ToLocalChecked());
+#endif
   /**
    * Thirty two bit floating point
    * @final
@@ -923,6 +965,17 @@ static void Init(Local<Object> target, Local<v8::Value>, void *) {
    * @type {string}
    */
   Nan::Set(target, Nan::New("GDT_CInt32").ToLocalChecked(), Nan::New(GDALGetDataTypeName(GDT_CInt32)).ToLocalChecked());
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 11)
+  /**
+   * Complex Float16
+   * @final
+   * @constant
+   * @name GDT_CFloat16
+   * @type {string}
+   */
+  Nan::Set(
+    target, Nan::New("GDT_CFloat16").ToLocalChecked(), Nan::New(GDALGetDataTypeName(GDT_CFloat16)).ToLocalChecked());
+#endif
   /**
    * Complex Float32
    * @final

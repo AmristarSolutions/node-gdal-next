@@ -7,8 +7,7 @@ describe('Open', () => {
   if (!semver.gte(gdal.version, '2.3.0')) {
     return
   }
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('GRIB', () => {
     let filename, ds: gdal.Dataset
@@ -116,6 +115,14 @@ describe('Open', () => {
     it('should support PNG compression', () => {
       const ds = gdal.open(`/vsigzip/${path.join(__dirname, 'data',
         'MRMS_NLDN_CG_001min_AvgDensity.latest.grib2.gz')}`)
+      const data = ds.bands.get(1).pixels.read(0, 0, ds.rasterSize.x, ds.rasterSize.y)
+      assert.instanceOf(data, Float64Array)
+      assert.lengthOf(data, ds.rasterSize.x * ds.rasterSize.y)
+    })
+
+    it('with bundled GDAL, should support AEC compression', () => {
+      const ds = gdal.open(`/vsigzip/${path.join(__dirname, 'data',
+        'arome_sp3.grib2.gz')}`)
       const data = ds.bands.get(1).pixels.read(0, 0, ds.rasterSize.x, ds.rasterSize.y)
       assert.instanceOf(data, Float64Array)
       assert.lengthOf(data, ds.rasterSize.x * ds.rasterSize.y)

@@ -10,19 +10,23 @@ on:
 jobs:
   test_npm_binaries:
 
-    runs-on: ${{ matrix.platforms }}
+    runs-on: ${{ matrix.platform }}
 
     strategy:
+      fail-fast: false
       matrix:
-        platforms: [ ubuntu-20.04, ubuntu-22.04, windows-2019, macos-11 ]
-        node-version: [ 16.x, 18.x, 20.x, 21.x ]
+        platform: [ ubuntu-22.04, ubuntu-24.04, windows-2022, macos-15-intel, macos-15 ]
+        node-version: [ 20, 22, 24 ]
+        include:
+          - platform: ubuntu-24.04
+            node-version: 25
 
     steps:
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: ${{ matrix.node-version }}
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v6
       with:
         python-version: "3.11"
     - name: Set up the unit tests
@@ -31,32 +35,36 @@ jobs:
         unzip repo.zip
         mv node-gdal-async-${{ github.event.inputs.version }}/package.json .
         mv node-gdal-async-${{ github.event.inputs.version }}/test .
+        mv node-gdal-async-${{ github.event.inputs.version }}/scripts .
         npm install
     - name: Install from npm
       run:  npm install --force gdal-async@${{ github.event.inputs.version }}
     - name: Run the unit tests
       run: |
         cd test
-        npx mocha --reporter=tap -r ts-node/register -r _common.ts -r _hooks.ts --timeout 20000 --v8-expose-gc *.test.ts
-      env:
-        TS_NODE_PROJECT: tsconfig.test.json
+        npx tsc -p tsconfig.test.json --noEmit
+        npx mocha --v8-expose-gc --reporter=tap -r tsx -r _common.ts -r _hooks.ts --timeout 20000 *.test.ts
 
 
   test_npm_rebuild:
 
-    runs-on: ${{ matrix.platforms }}
+    runs-on: ${{ matrix.platform }}
 
     strategy:
+      fail-fast: false
       matrix:
-        platforms: [ ubuntu-20.04, ubuntu-22.04, windows-2019, macos-11 ]
-        node-version: [ 16.x, 18.x, 20.x, 21.x ]
+        platform: [ ubuntu-22.04, ubuntu-24.04, windows-2022, macos-15-intel, macos-15 ]
+        node-version: [ 20, 22, 24 ]
+        include:
+          - platform: ubuntu-24.04
+            node-version: 25
 
     steps:
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: ${{ matrix.node-version }}
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v6
       with:
         python-version: "3.11"
     - name: Set up the unit tests
@@ -65,12 +73,12 @@ jobs:
         unzip repo.zip
         mv node-gdal-async-${{ github.event.inputs.version }}/package.json .
         mv node-gdal-async-${{ github.event.inputs.version }}/test .
+        mv node-gdal-async-${{ github.event.inputs.version }}/scripts .
         npm install
     - name: Rebuild with npm
       run: npm install --verbose --force gdal-async@${{ github.event.inputs.version }} --build-from-source
     - name: Run the unit tests
       run: |
         cd test
-        npx mocha --reporter=tap -r ts-node/register -r _common.ts -r _hooks.ts --timeout 20000 --v8-expose-gc *.test.ts
-      env:
-        TS_NODE_PROJECT: tsconfig.test.json
+        npx tsc -p tsconfig.test.json --noEmit
+        npx mocha --v8-expose-gc --reporter=tap -r tsx -r _common.ts -r _hooks.ts --timeout 20000 *.test.ts

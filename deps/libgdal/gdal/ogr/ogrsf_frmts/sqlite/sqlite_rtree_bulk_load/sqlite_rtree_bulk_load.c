@@ -7,23 +7,7 @@
  * Copyright (c) 2020- 2023 Joshua J Baker
  * Copyright (c) 2023, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef __STDC_FORMAT_MACROS
@@ -35,6 +19,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -813,6 +798,16 @@ static bool insert_into_db(const struct rtree_insert_context* ctxt,
     return true;
 }
 
+static bool IsLowercaseAlpha(const char* s)
+{
+    for (; *s != 0; ++s) {
+        if (!(*s >= 'a' && *s <= 'z')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SQLITE_RTREE_BL_SYMBOL(sqlite_rtree_bl_serialize)(
                                const struct sqlite_rtree_bl *tr,
                                sqlite3* hDB,
@@ -827,10 +822,24 @@ bool SQLITE_RTREE_BL_SYMBOL(sqlite_rtree_bl_serialize)(
         *p_error_msg = NULL;
     }
 
-    char* sql = sqlite3_mprintf(
-        "CREATE VIRTUAL TABLE \"%w\" USING rtree(\"%w\", \"%w\", \"%w\", \"%w\", \"%w\")",
-        rtree_name, rowid_colname, minx_colname, maxx_colname, miny_colname,
-        maxy_colname);
+    char* sql;
+    if (IsLowercaseAlpha(rowid_colname) &&
+        IsLowercaseAlpha(minx_colname) &&
+        IsLowercaseAlpha(maxx_colname) &&
+        IsLowercaseAlpha(miny_colname) &&
+        IsLowercaseAlpha(maxy_colname)) {
+        /* To make OGC GeoPackage compliance test happy... */
+        sql = sqlite3_mprintf(
+            "CREATE VIRTUAL TABLE \"%w\" USING rtree(%s, %s, %s, %s, %s)",
+            rtree_name, rowid_colname, minx_colname, maxx_colname, miny_colname,
+            maxy_colname);
+    }
+    else {
+        sql = sqlite3_mprintf(
+            "CREATE VIRTUAL TABLE \"%w\" USING rtree(\"%w\", \"%w\", \"%w\", \"%w\", \"%w\")",
+            rtree_name, rowid_colname, minx_colname, maxx_colname, miny_colname,
+            maxy_colname);
+    }
     int ret = sqlite3_exec(hDB, sql, NULL, NULL, p_error_msg);
     sqlite3_free(sql);
     if (ret != SQLITE_OK) {

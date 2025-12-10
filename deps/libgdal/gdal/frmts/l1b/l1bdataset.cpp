@@ -14,28 +14,16 @@
  * Lagrange interpolation suitable for NOAA level 1B file formats.
  * Submitted by Andrew Brooks <arb@sat.dundee.ac.uk>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_string.h"
 #include "gdal_frmts.h"
 #include "gdal_pam.h"
+#include "gdal_driver.h"
+#include "gdal_drivermanager.h"
+#include "gdal_openinfo.h"
+#include "gdal_cpp_functions.h"
 #include "ogr_srs_api.h"
 
 #include <algorithm>
@@ -203,6 +191,7 @@ static const char *const apszBandDesc[] = {
 /************************************************************************/
 
 #define L1B_TIMECODE_LENGTH 100
+
 class TimeCode
 {
     long lYear;
@@ -220,26 +209,32 @@ class TimeCode
     {
         lYear = year;
     }
+
     void SetDay(long day)
     {
         lDay = day;
     }
+
     void SetMillisecond(long millisecond)
     {
         lMillisecond = millisecond;
     }
+
     long GetYear() const
     {
         return lYear;
     }
+
     long GetDay() const
     {
         return lDay;
     }
+
     long GetMillisecond() const
     {
         return lMillisecond;
     }
+
     char *PrintTime()
     {
         snprintf(szString, L1B_TIMECODE_LENGTH,
@@ -248,6 +243,7 @@ class TimeCode
         return szString;
     }
 };
+
 #undef L1B_TIMECODE_LENGTH
 
 /************************************************************************/
@@ -344,11 +340,11 @@ class L1BDataset final : public GDALPamDataset
 
   public:
     explicit L1BDataset(L1BFileFormat);
-    virtual ~L1BDataset();
+    ~L1BDataset() override;
 
-    virtual int GetGCPCount() override;
+    int GetGCPCount() override;
     const OGRSpatialReference *GetGCPSpatialRef() const override;
-    virtual const GDAL_GCP *GetGCPs() override;
+    const GDAL_GCP *GetGCPs() override;
 
     static int Identify(GDALOpenInfo *);
     static GDALDataset *Open(GDALOpenInfo *);
@@ -368,9 +364,9 @@ class L1BRasterBand final : public GDALPamRasterBand
     L1BRasterBand(L1BDataset *, int);
 
     //    virtual double GetNoDataValue( int *pbSuccess = NULL );
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual GDALRasterBand *GetMaskBand() override;
-    virtual int GetMaskFlags() override;
+    CPLErr IReadBlock(int, int, void *) override;
+    GDALRasterBand *GetMaskBand() override;
+    int GetMaskFlags() override;
 };
 
 /************************************************************************/
@@ -386,7 +382,7 @@ class L1BMaskBand final : public GDALPamRasterBand
   public:
     explicit L1BMaskBand(L1BDataset *);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
+    CPLErr IReadBlock(int, int, void *) override;
 };
 
 /************************************************************************/
@@ -414,7 +410,7 @@ L1BMaskBand::L1BMaskBand(L1BDataset *poDSIn)
 CPLErr L1BMaskBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
                                void *pImage)
 {
-    L1BDataset *poGDS = (L1BDataset *)poDS;
+    L1BDataset *poGDS = cpl::down_cast<L1BDataset *>(poDS);
 
     CPL_IGNORE_RET_VAL(
         VSIFSeekL(poGDS->fp, poGDS->GetLineOffset(nBlockYOff) + 24, SEEK_SET));
@@ -452,7 +448,7 @@ L1BRasterBand::L1BRasterBand(L1BDataset *poDSIn, int nBandIn)
 
 GDALRasterBand *L1BRasterBand::GetMaskBand()
 {
-    L1BDataset *poGDS = (L1BDataset *)poDS;
+    L1BDataset *poGDS = cpl::down_cast<L1BDataset *>(poDS);
     if (poGDS->poMaskBand)
         return poGDS->poMaskBand;
     return GDALPamRasterBand::GetMaskBand();
@@ -464,7 +460,7 @@ GDALRasterBand *L1BRasterBand::GetMaskBand()
 
 int L1BRasterBand::GetMaskFlags()
 {
-    L1BDataset *poGDS = (L1BDataset *)poDS;
+    L1BDataset *poGDS = cpl::down_cast<L1BDataset *>(poDS);
     if (poGDS->poMaskBand)
         return GMF_PER_DATASET;
     return GDALPamRasterBand::GetMaskFlags();
@@ -477,7 +473,7 @@ int L1BRasterBand::GetMaskFlags()
 CPLErr L1BRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
                                  void *pImage)
 {
-    L1BDataset *poGDS = (L1BDataset *)poDS;
+    L1BDataset *poGDS = cpl::down_cast<L1BDataset *>(poDS);
 
     /* -------------------------------------------------------------------- */
     /*      Seek to data.                                                   */
@@ -523,8 +519,8 @@ CPLErr L1BRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
             CPL_IGNORE_RET_VAL(
                 VSIFReadL(iRawScan, 1, poGDS->nRecordSize, poGDS->fp));
 
-            iScan = (GUInt16 *)CPLMalloc(poGDS->GetRasterXSize() *
-                                         poGDS->nBands * sizeof(GUInt16));
+            iScan = (GUInt16 *)CPLMalloc(
+                sizeof(GUInt16) * poGDS->GetRasterXSize() * poGDS->nBands);
             for (i = 0; i < poGDS->GetRasterXSize() * poGDS->nBands; i++)
             {
                 iScan[i] =
@@ -542,8 +538,8 @@ CPLErr L1BRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff, int nBlockYOff,
             CPL_IGNORE_RET_VAL(
                 VSIFReadL(byRawScan, 1, poGDS->nRecordSize, poGDS->fp));
 
-            iScan = (GUInt16 *)CPLMalloc(poGDS->GetRasterXSize() *
-                                         poGDS->nBands * sizeof(GUInt16));
+            iScan = (GUInt16 *)CPLMalloc(
+                sizeof(GUInt16) * poGDS->GetRasterXSize() * poGDS->nBands);
             for (i = 0; i < poGDS->GetRasterXSize() * poGDS->nBands; i++)
                 iScan[i] = byRawScan[poGDS->nRecordDataStart /
                                          (int)sizeof(byRawScan[0]) +
@@ -758,6 +754,7 @@ void L1BDataset::FetchNOAA15TimeCode(TimeCode *psTime,
                                                                : DESCEND;
     }
 }
+
 /************************************************************************/
 /*                          FetchTimeCode()                             */
 /************************************************************************/
@@ -1039,16 +1036,20 @@ void L1BDataset::FetchMetadata()
         return;
     }
 
-    const char *pszDir = CPLGetConfigOption("L1B_METADATA_DIRECTORY", nullptr);
-    if (pszDir == nullptr)
+    std::string osDir = CPLGetConfigOption("L1B_METADATA_DIRECTORY", "");
+    if (osDir.empty())
     {
-        pszDir = CPLGetPath(GetDescription());
-        if (pszDir[0] == '\0')
-            pszDir = ".";
+        osDir = CPLGetPathSafe(GetDescription());
+        if (osDir.empty())
+            osDir = ".";
     }
-    CPLString osMetadataFile(CPLSPrintf("%s/%s_metadata.csv", pszDir,
-                                        CPLGetFilename(GetDescription())));
-    VSILFILE *fpCSV = VSIFOpenL(osMetadataFile, "wb");
+    const std::string osMetadataFile =
+        std::string(osDir)
+            .append("/")
+            .append(CPLGetFilename(GetDescription()))
+            .append("_metadata.csv");
+    CPL_IGNORE_RET_VAL(osDir);
+    VSILFILE *fpCSV = VSIFOpenL(osMetadataFile.c_str(), "wb");
     if (fpCSV == nullptr)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
@@ -1145,16 +1146,20 @@ void L1BDataset::FetchMetadata()
 void L1BDataset::FetchMetadataNOAA15()
 {
     int i, j;
-    const char *pszDir = CPLGetConfigOption("L1B_METADATA_DIRECTORY", nullptr);
-    if (pszDir == nullptr)
+    std::string osDir = CPLGetConfigOption("L1B_METADATA_DIRECTORY", "");
+    if (osDir.empty())
     {
-        pszDir = CPLGetPath(GetDescription());
-        if (pszDir[0] == '\0')
-            pszDir = ".";
+        osDir = CPLGetPathSafe(GetDescription());
+        if (osDir.empty())
+            osDir = ".";
     }
-    CPLString osMetadataFile(CPLSPrintf("%s/%s_metadata.csv", pszDir,
-                                        CPLGetFilename(GetDescription())));
-    VSILFILE *fpCSV = VSIFOpenL(osMetadataFile, "wb");
+    const std::string osMetadataFile =
+        std::string(osDir)
+            .append("/")
+            .append(CPLGetFilename(GetDescription()))
+            .append("_metadata.csv");
+    CPL_IGNORE_RET_VAL(osDir);
+    VSILFILE *fpCSV = VSIFOpenL(osMetadataFile.c_str(), "wb");
     if (fpCSV == nullptr)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
@@ -2391,7 +2396,7 @@ class L1BGeolocDataset final : public GDALDataset
 
   public:
     L1BGeolocDataset(L1BDataset *poMainDS, int bInterpolGeolocationDS);
-    virtual ~L1BGeolocDataset();
+    ~L1BGeolocDataset() override;
 
     static GDALDataset *CreateGeolocationDS(L1BDataset *poL1BDS,
                                             int bInterpolGeolocationDS);
@@ -2406,8 +2411,8 @@ class L1BGeolocRasterBand final : public GDALRasterBand
   public:
     L1BGeolocRasterBand(L1BGeolocDataset *poDS, int nBand);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual double GetNoDataValue(int *pbSuccess = nullptr) override;
+    CPLErr IReadBlock(int, int, void *) override;
+    double GetNoDataValue(int *pbSuccess = nullptr) override;
 };
 
 /************************************************************************/
@@ -2571,7 +2576,7 @@ static void L1BInterpol(
 CPLErr L1BGeolocRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff,
                                        int nBlockYOff, void *pData)
 {
-    L1BGeolocDataset *poGDS = (L1BGeolocDataset *)poDS;
+    L1BGeolocDataset *poGDS = cpl::down_cast<L1BGeolocDataset *>(poDS);
     L1BDataset *poL1BDS = poGDS->poL1BDS;
     GDAL_GCP *pasGCPList =
         (GDAL_GCP *)CPLCalloc(poL1BDS->nGCPsPerLine, sizeof(GDAL_GCP));
@@ -2693,7 +2698,7 @@ class L1BSolarZenithAnglesDataset final : public GDALDataset
 
   public:
     explicit L1BSolarZenithAnglesDataset(L1BDataset *poMainDS);
-    virtual ~L1BSolarZenithAnglesDataset();
+    ~L1BSolarZenithAnglesDataset() override;
 
     static GDALDataset *CreateSolarZenithAnglesDS(L1BDataset *poL1BDS);
 };
@@ -2708,8 +2713,8 @@ class L1BSolarZenithAnglesRasterBand final : public GDALRasterBand
     L1BSolarZenithAnglesRasterBand(L1BSolarZenithAnglesDataset *poDS,
                                    int nBand);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual double GetNoDataValue(int *pbSuccess = nullptr) override;
+    CPLErr IReadBlock(int, int, void *) override;
+    double GetNoDataValue(int *pbSuccess = nullptr) override;
 };
 
 /************************************************************************/
@@ -2755,7 +2760,8 @@ L1BSolarZenithAnglesRasterBand::L1BSolarZenithAnglesRasterBand(
 CPLErr L1BSolarZenithAnglesRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff,
                                                   int nBlockYOff, void *pData)
 {
-    L1BSolarZenithAnglesDataset *poGDS = (L1BSolarZenithAnglesDataset *)poDS;
+    L1BSolarZenithAnglesDataset *poGDS =
+        cpl::down_cast<L1BSolarZenithAnglesDataset *>(poDS);
     L1BDataset *poL1BDS = poGDS->poL1BDS;
     int i;
 
@@ -2907,7 +2913,7 @@ class L1BNOAA15AnglesDataset final : public GDALDataset
 
   public:
     explicit L1BNOAA15AnglesDataset(L1BDataset *poMainDS);
-    virtual ~L1BNOAA15AnglesDataset();
+    ~L1BNOAA15AnglesDataset() override;
 
     static GDALDataset *CreateAnglesDS(L1BDataset *poL1BDS);
 };
@@ -2921,7 +2927,7 @@ class L1BNOAA15AnglesRasterBand final : public GDALRasterBand
   public:
     L1BNOAA15AnglesRasterBand(L1BNOAA15AnglesDataset *poDS, int nBand);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
+    CPLErr IReadBlock(int, int, void *) override;
 };
 
 /************************************************************************/
@@ -2973,7 +2979,8 @@ L1BNOAA15AnglesRasterBand::L1BNOAA15AnglesRasterBand(
 CPLErr L1BNOAA15AnglesRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff,
                                              int nBlockYOff, void *pData)
 {
-    L1BNOAA15AnglesDataset *poGDS = (L1BNOAA15AnglesDataset *)poDS;
+    L1BNOAA15AnglesDataset *poGDS =
+        cpl::down_cast<L1BNOAA15AnglesDataset *>(poDS);
     L1BDataset *poL1BDS = poGDS->poL1BDS;
     int i;
 
@@ -3038,7 +3045,7 @@ class L1BCloudsDataset final : public GDALDataset
 
   public:
     explicit L1BCloudsDataset(L1BDataset *poMainDS);
-    virtual ~L1BCloudsDataset();
+    ~L1BCloudsDataset() override;
 
     static GDALDataset *CreateCloudsDS(L1BDataset *poL1BDS);
 };
@@ -3052,7 +3059,7 @@ class L1BCloudsRasterBand final : public GDALRasterBand
   public:
     L1BCloudsRasterBand(L1BCloudsDataset *poDS, int nBand);
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
+    CPLErr IReadBlock(int, int, void *) override;
 };
 
 /************************************************************************/
@@ -3096,7 +3103,7 @@ L1BCloudsRasterBand::L1BCloudsRasterBand(L1BCloudsDataset *poDSIn, int nBandIn)
 CPLErr L1BCloudsRasterBand::IReadBlock(CPL_UNUSED int nBlockXOff,
                                        int nBlockYOff, void *pData)
 {
-    L1BCloudsDataset *poGDS = (L1BCloudsDataset *)poDS;
+    L1BCloudsDataset *poGDS = cpl::down_cast<L1BCloudsDataset *>(poDS);
     L1BDataset *poL1BDS = poGDS->poL1BDS;
     int i;
 
@@ -3301,7 +3308,7 @@ GDALDataset *L1BDataset::Open(GDALOpenInfo *poOpenInfo)
             pszFilename++;
         osFilename = pszFilename;
         if (!osFilename.empty() && osFilename.back() == '"')
-            osFilename.resize(osFilename.size() - 1);
+            osFilename.pop_back();
         fp = VSIFOpenL(osFilename, "rb");
         if (!fp)
         {
@@ -3331,9 +3338,7 @@ GDALDataset *L1BDataset::Open(GDALOpenInfo *poOpenInfo)
     /* -------------------------------------------------------------------- */
     if (poOpenInfo->eAccess == GA_Update)
     {
-        CPLError(CE_Failure, CPLE_NotSupported,
-                 "The L1B driver does not support update access to existing"
-                 " datasets.\n");
+        ReportUpdateNotSupportedByDriver("L1B");
         if (fp != nullptr)
             CPL_IGNORE_RET_VAL(VSIFCloseL(fp));
         return nullptr;

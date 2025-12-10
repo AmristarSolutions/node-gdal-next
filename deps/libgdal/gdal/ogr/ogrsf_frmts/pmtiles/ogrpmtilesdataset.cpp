@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2023, Planet Labs
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_pmtiles.h"
@@ -48,7 +32,7 @@ OGRPMTilesDataset::~OGRPMTilesDataset()
 /*                              GetLayer()                              */
 /************************************************************************/
 
-OGRLayer *OGRPMTilesDataset::GetLayer(int iLayer)
+const OGRLayer *OGRPMTilesDataset::GetLayer(int iLayer) const
 
 {
     if (iLayer < 0 || iLayer >= GetLayerCount())
@@ -231,14 +215,16 @@ bool OGRPMTilesDataset::Open(GDALOpenInfo *poOpenInfo)
     }
 
     // Read metadata
-    const auto *posMetadata = ReadInternal(m_sHeader.json_metadata_offset,
-                                           m_sHeader.json_metadata_bytes);
+    const auto *posMetadata =
+        ReadInternal(m_sHeader.json_metadata_offset,
+                     m_sHeader.json_metadata_bytes, "metadata");
     if (!posMetadata)
         return false;
     CPLDebugOnly("PMTiles", "Metadata = %s", posMetadata->c_str());
     m_osMetadata = *posMetadata;
 
-    m_osMetadataFilename = CPLSPrintf("/vsimem/pmtiles/metadata_%p.json", this);
+    m_osMetadataFilename =
+        VSIMemGenerateHiddenFilename("pmtiles_metadata.json");
     VSIFCloseL(VSIFileFromMemBuffer(m_osMetadataFilename.c_str(),
                                     reinterpret_cast<GByte *>(&m_osMetadata[0]),
                                     m_osMetadata.size(), false));
@@ -364,7 +350,7 @@ bool OGRPMTilesDataset::Open(GDALOpenInfo *poOpenInfo)
                 OGRMVTFindAttributesFromTileStat(oTileStatLayers,
                                                  oId.ToString().c_str());
 
-            m_apoLayers.push_back(cpl::make_unique<OGRPMTilesVectorLayer>(
+            m_apoLayers.push_back(std::make_unique<OGRPMTilesVectorLayer>(
                 this, oId.ToString().c_str(), oFields, oAttributesFromTileStats,
                 bJsonField, dfMinX, dfMinY, dfMaxX, dfMaxY, eGeomType,
                 nZoomLevel, bZoomLevelFromSpatialFilter));
@@ -379,38 +365,65 @@ bool OGRPMTilesDataset::Open(GDALOpenInfo *poOpenInfo)
 /************************************************************************/
 
 const std::string *OGRPMTilesDataset::Read(const CPLCompressor *psDecompressor,
-                                           uint64_t nOffset, uint64_t nSize)
+                                           uint64_t nOffset, uint64_t nSize,
+                                           const char *pszDataType)
 {
     if (nSize > 10 * 1024 * 1024)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
-                 "Too large amount of data to read");
+                 "Too large amount of %s to read: " CPL_FRMT_GUIB
+                 " bytes at offset " CPL_FRMT_GUIB,
+                 pszDataType, static_cast<GUIntBig>(nSize),
+                 static_cast<GUIntBig>(nOffset));
         return nullptr;
     }
     m_osBuffer.resize(static_cast<size_t>(nSize));
     m_poFile->Seek(nOffset, SEEK_SET);
     if (m_poFile->Read(&m_osBuffer[0], m_osBuffer.size(), 1) != 1)
     {
-        CPLError(CE_Failure, CPLE_AppDefined, "Cannot read");
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "Cannot read %s of length %u at offset " CPL_FRMT_GUIB,
+                 pszDataType, unsigned(nSize), static_cast<GUIntBig>(nOffset));
         return nullptr;
     }
 
     if (psDecompressor)
     {
         m_osDecompressedBuffer.resize(32 + 16 * m_osBuffer.size());
-        void *pOutputData = &m_osDecompressedBuffer[0];
-        size_t nOutputSize = m_osDecompressedBuffer.size();
-        if (!psDecompressor->pfnFunc(m_osBuffer.data(), m_osBuffer.size(),
-                                     &pOutputData, &nOutputSize, nullptr,
-                                     psDecompressor->user_data))
+        for (int iTry = 0; iTry < 2; ++iTry)
         {
-            CPLError(CE_Failure, CPLE_AppDefined,
-                     "Cannot decompress. Uncompressed buffer size should be at "
-                     "least %u",
-                     unsigned(nOutputSize));
-            return nullptr;
+            void *pOutputData = &m_osDecompressedBuffer[0];
+            size_t nOutputSize = m_osDecompressedBuffer.size();
+            if (!psDecompressor->pfnFunc(m_osBuffer.data(), m_osBuffer.size(),
+                                         &pOutputData, &nOutputSize, nullptr,
+                                         psDecompressor->user_data))
+            {
+                if (iTry == 0)
+                {
+                    pOutputData = nullptr;
+                    nOutputSize = 0;
+                    if (psDecompressor->pfnFunc(
+                            m_osBuffer.data(), m_osBuffer.size(), &pOutputData,
+                            &nOutputSize, nullptr, psDecompressor->user_data))
+                    {
+                        CPLDebug("PMTiles",
+                                 "Buffer of size %u uncompresses to %u bytes",
+                                 unsigned(nSize), unsigned(nOutputSize));
+                        m_osDecompressedBuffer.resize(nOutputSize);
+                        continue;
+                    }
+                }
+
+                CPLError(CE_Failure, CPLE_AppDefined,
+                         "Cannot decompress %s of length %u at "
+                         "offset " CPL_FRMT_GUIB,
+                         pszDataType, unsigned(nSize),
+                         static_cast<GUIntBig>(nOffset));
+                return nullptr;
+            }
+            m_osDecompressedBuffer.resize(nOutputSize);
+            break;
         }
-        m_osDecompressedBuffer.resize(nOutputSize);
         return &m_osDecompressedBuffer;
     }
     else
@@ -424,9 +437,10 @@ const std::string *OGRPMTilesDataset::Read(const CPLCompressor *psDecompressor,
 /************************************************************************/
 
 const std::string *OGRPMTilesDataset::ReadInternal(uint64_t nOffset,
-                                                   uint64_t nSize)
+                                                   uint64_t nSize,
+                                                   const char *pszDataType)
 {
-    return Read(m_psInternalDecompressor, nOffset, nSize);
+    return Read(m_psInternalDecompressor, nOffset, nSize, pszDataType);
 }
 
 /************************************************************************/
@@ -436,5 +450,5 @@ const std::string *OGRPMTilesDataset::ReadInternal(uint64_t nOffset,
 const std::string *OGRPMTilesDataset::ReadTileData(uint64_t nOffset,
                                                    uint64_t nSize)
 {
-    return Read(m_psTileDataDecompressor, nOffset, nSize);
+    return Read(m_psTileDataDecompressor, nOffset, nSize, "tile data");
 }

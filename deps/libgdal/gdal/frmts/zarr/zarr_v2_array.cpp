@@ -7,28 +7,14 @@
  ******************************************************************************
  * Copyright (c) 2021, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
+#include "cpl_float.h"
 #include "cpl_vsi_virtual.h"
 #include "gdal_thread_pool.h"
 #include "zarr.h"
+#include "vsikerchunk.h"
 
 #include "netcdf_cf_constants.h"  // for CF_UNITS, etc
 
@@ -92,16 +78,17 @@ ZarrV2Array::~ZarrV2Array()
 /*                                Flush()                               */
 /************************************************************************/
 
-void ZarrV2Array::Flush()
+bool ZarrV2Array::Flush()
 {
     if (!m_bValid)
-        return;
+        return true;
 
-    ZarrV2Array::FlushDirtyTile();
+    bool ret = ZarrV2Array::FlushDirtyTile();
 
     if (m_bDefinitionModified)
     {
-        Serialize();
+        if (!Serialize())
+            ret = false;
         m_bDefinitionModified = false;
     }
 
@@ -143,11 +130,15 @@ void ZarrV2Array::Flush()
 
         CPLJSONDocument oDoc;
         oDoc.SetRoot(oAttrs);
-        const std::string osAttrFilename = CPLFormFilename(
-            CPLGetDirname(m_osFilename.c_str()), ".zattrs", nullptr);
-        oDoc.Save(osAttrFilename);
+        const std::string osAttrFilename =
+            CPLFormFilenameSafe(CPLGetDirnameSafe(m_osFilename.c_str()).c_str(),
+                                ".zattrs", nullptr);
+        if (!oDoc.Save(osAttrFilename))
+            ret = false;
         m_poSharedResource->SetZMetadataItem(osAttrFilename, oAttrs);
     }
+
+    return ret;
 }
 
 /************************************************************************/
@@ -168,7 +159,7 @@ static void StripUselessItemsFromCompressorConfiguration(CPLJSONObject &o)
 /*                    ZarrV2Array::Serialize()                          */
 /************************************************************************/
 
-void ZarrV2Array::Serialize()
+bool ZarrV2Array::Serialize()
 {
     CPLJSONDocument oDoc;
     CPLJSONObject oRoot = oDoc.GetRoot();
@@ -268,9 +259,11 @@ void ZarrV2Array::Serialize()
         oRoot.Add("dimension_separator", m_osDimSeparator);
     }
 
-    oDoc.Save(m_osFilename);
+    bool ret = oDoc.Save(m_osFilename);
 
     m_poSharedResource->SetZMetadataItem(m_osFilename, oRoot);
+
+    return ret;
 }
 
 /************************************************************************/
@@ -450,42 +443,28 @@ bool ZarrV2Array::LoadTileData(const uint64_t *tileIndices, bool bUseMutex,
                      ->GetStreamingFilename(osFilename);
 
     // First if we have a tile presence cache, check tile presence from it
+    bool bEarlyRet;
     if (bUseMutex)
-        m_oMutex.lock();
-    auto poTilePresenceArray = OpenTilePresenceCache(false);
-    if (poTilePresenceArray)
     {
-        std::vector<GUInt64> anTileIdx(m_aoDims.size());
-        const std::vector<size_t> anCount(m_aoDims.size(), 1);
-        const std::vector<GInt64> anArrayStep(m_aoDims.size(), 0);
-        const std::vector<GPtrDiff_t> anBufferStride(m_aoDims.size(), 0);
-        const auto eByteDT = GDALExtendedDataType::Create(GDT_Byte);
-        for (size_t i = 0; i < m_aoDims.size(); ++i)
-        {
-            anTileIdx[i] = static_cast<GUInt64>(tileIndices[i]);
-        }
-        GByte byValue = 0;
-        if (poTilePresenceArray->Read(anTileIdx.data(), anCount.data(),
-                                      anArrayStep.data(), anBufferStride.data(),
-                                      eByteDT, &byValue) &&
-            byValue == 0)
-        {
-            if (bUseMutex)
-                m_oMutex.unlock();
-            CPLDebugOnly(ZARR_DEBUG_KEY, "Tile %s missing (=nodata)",
-                         osFilename.c_str());
-            bMissingTileOut = true;
-            return true;
-        }
+        std::lock_guard<std::mutex> oLock(m_oMutex);
+        bEarlyRet = IsTileMissingFromCacheInfo(osFilename, tileIndices);
     }
-    if (bUseMutex)
-        m_oMutex.unlock();
+    else
+    {
+        bEarlyRet = IsTileMissingFromCacheInfo(osFilename, tileIndices);
+    }
+    if (bEarlyRet)
+    {
+        bMissingTileOut = true;
+        return true;
+    }
 
     VSILFILE *fp = nullptr;
     // This is the number of files returned in a S3 directory listing operation
     constexpr uint64_t MAX_TILES_ALLOWED_FOR_DIRECTORY_LISTING = 1000;
     const char *const apszOpenOptions[] = {"IGNORE_FILENAME_RESTRICTIONS=YES",
                                            nullptr};
+    const auto nErrorBefore = CPLGetErrorCounter();
     if ((m_osDimSeparator == "/" && !m_anBlockSize.empty() &&
          m_anBlockSize.back() > MAX_TILES_ALLOWED_FOR_DIRECTORY_LISTING) ||
         (m_osDimSeparator != "/" &&
@@ -502,11 +481,18 @@ bool ZarrV2Array::LoadTileData(const uint64_t *tileIndices, bool bUseMutex,
     }
     if (fp == nullptr)
     {
-        // Missing files are OK and indicate nodata_value
-        CPLDebugOnly(ZARR_DEBUG_KEY, "Tile %s missing (=nodata)",
-                     osFilename.c_str());
-        bMissingTileOut = true;
-        return true;
+        if (nErrorBefore != CPLGetErrorCounter())
+        {
+            return false;
+        }
+        else
+        {
+            // Missing files are OK and indicate nodata_value
+            CPLDebugOnly(ZARR_DEBUG_KEY, "Tile %s missing (=nodata)",
+                         osFilename.c_str());
+            bMissingTileOut = true;
+            return true;
+        }
     }
 
     bMissingTileOut = false;
@@ -578,7 +564,12 @@ bool ZarrV2Array::LoadTileData(const uint64_t *tileIndices, bool bUseMutex,
         const auto &oFilter = m_oFiltersArray[i];
         const auto osFilterId = oFilter["id"].ToString();
         const auto psFilterDecompressor =
-            CPLGetDecompressor(osFilterId.c_str());
+            EQUAL(osFilterId.c_str(), "shuffle") ? ZarrGetShuffleDecompressor()
+            : EQUAL(osFilterId.c_str(), "quantize")
+                ? ZarrGetQuantizeDecompressor()
+            : EQUAL(osFilterId.c_str(), "fixedscaleoffset")
+                ? ZarrGetFixedScaleOffsetDecompressor()
+                : CPLGetDecompressor(osFilterId.c_str());
         CPLAssert(psFilterDecompressor);
 
         CPLStringList aosOptions;
@@ -684,6 +675,7 @@ bool ZarrV2Array::IAdviseRead(const GUInt64 *arrayStartIdx, const size_t *count,
         size_t nFirstIdx = 0;
         size_t nLastIdxNotIncluded = 0;
     };
+
     std::vector<JobStruct> asJobStructs;
 
     bool bGlobalStatus = true;
@@ -819,7 +811,7 @@ bool ZarrV2Array::FlushDirtyTile() const
 
     const size_t nSourceSize =
         m_aoDtypeElts.back().nativeOffset + m_aoDtypeElts.back().nativeSize;
-    auto &abyTile =
+    const auto &abyTile =
         m_abyDecodedTileData.empty() ? m_abyRawTileData : m_abyDecodedTileData;
 
     if (IsEmptyTile(abyTile))
@@ -860,7 +852,16 @@ bool ZarrV2Array::FlushDirtyTile() const
     for (const auto &oFilter : m_oFiltersArray)
     {
         const auto osFilterId = oFilter["id"].ToString();
-        const auto psFilterCompressor = CPLGetCompressor(osFilterId.c_str());
+        if (osFilterId == "quantize" || osFilterId == "fixedscaleoffset")
+        {
+            CPLError(CE_Failure, CPLE_NotSupported,
+                     "%s filter not supported for writing", osFilterId.c_str());
+            return false;
+        }
+        const auto psFilterCompressor =
+            EQUAL(osFilterId.c_str(), "shuffle")
+                ? ZarrGetShuffleCompressor()
+                : CPLGetCompressor(osFilterId.c_str());
         CPLAssert(psFilterCompressor);
 
         CPLStringList aosOptions;
@@ -887,7 +888,7 @@ bool ZarrV2Array::FlushDirtyTile() const
 
     if (m_osDimSeparator == "/")
     {
-        std::string osDir = CPLGetDirname(osFilename.c_str());
+        std::string osDir = CPLGetDirnameSafe(osFilename.c_str());
         VSIStatBufL sStat;
         if (VSIStatL(osDir.c_str(), &sStat) != 0)
         {
@@ -898,6 +899,16 @@ bool ZarrV2Array::FlushDirtyTile() const
                 return false;
             }
         }
+    }
+
+    if (m_psCompressor == nullptr && m_psDecompressor != nullptr)
+    {
+        // Case of imagecodecs_tiff
+
+        CPLError(CE_Failure, CPLE_NotSupported,
+                 "Only decompression supported for '%s' compression method",
+                 m_osDecompressorId.c_str());
+        return false;
     }
 
     VSILFILE *fp = VSIFOpenL(osFilename.c_str(), "wb");
@@ -940,7 +951,7 @@ bool ZarrV2Array::FlushDirtyTile() const
             void *out_buffer = &abyCompressedData[0];
             size_t out_size = abyCompressedData.size();
             CPLStringList aosOptions;
-            const auto compressorConfig = m_oCompressorJSon;
+            const auto &compressorConfig = m_oCompressorJSon;
             for (const auto &obj : compressorConfig.GetChildren())
             {
                 aosOptions.SetNameValue(obj.GetName().c_str(),
@@ -1002,8 +1013,8 @@ std::string ZarrV2Array::BuildTileFilename(const uint64_t *tileIndices) const
         }
     }
 
-    return CPLFormFilename(CPLGetDirname(m_osFilename.c_str()),
-                           osFilename.c_str(), nullptr);
+    return CPLFormFilenameSafe(CPLGetDirnameSafe(m_osFilename.c_str()).c_str(),
+                               osFilename.c_str(), nullptr);
 }
 
 /************************************************************************/
@@ -1012,7 +1023,7 @@ std::string ZarrV2Array::BuildTileFilename(const uint64_t *tileIndices) const
 
 std::string ZarrV2Array::GetDataDirectory() const
 {
-    return std::string(CPLGetDirname(m_osFilename.c_str()));
+    return CPLGetDirnameSafe(m_osFilename.c_str());
 }
 
 /************************************************************************/
@@ -1154,9 +1165,11 @@ static GDALExtendedDataType ParseDtype(const CPLJSONObject &obj,
             }
             else if (chType == 'f' && nBytes == 2)
             {
+                // elt.nativeType = DtypeElt::NativeType::IEEEFP;
+                // elt.gdalTypeIsApproxOfNative = true;
+                // eDT = GDT_Float32;
                 elt.nativeType = DtypeElt::NativeType::IEEEFP;
-                elt.gdalTypeIsApproxOfNative = true;
-                eDT = GDT_Float32;
+                eDT = GDT_Float16;
             }
             else if (chType == 'f' && nBytes == 4)
             {
@@ -1281,51 +1294,20 @@ std::shared_ptr<ZarrArray>
 ZarrV2Group::LoadArray(const std::string &osArrayName,
                        const std::string &osZarrayFilename,
                        const CPLJSONObject &oRoot, bool bLoadedFromZMetadata,
-                       const CPLJSONObject &oAttributesIn,
-                       std::set<std::string> &oSetFilenamesInLoading) const
+                       const CPLJSONObject &oAttributesIn) const
 {
-    // Prevent too deep or recursive array loading
-    if (oSetFilenamesInLoading.find(osZarrayFilename) !=
-        oSetFilenamesInLoading.end())
-    {
-        CPLError(CE_Failure, CPLE_AppDefined,
-                 "Attempt at recursively loading %s", osZarrayFilename.c_str());
-        return nullptr;
-    }
-    if (oSetFilenamesInLoading.size() == 32)
-    {
-        CPLError(CE_Failure, CPLE_AppDefined,
-                 "Too deep call stack in LoadArray()");
-        return nullptr;
-    }
-
-    struct SetFilenameAdder
-    {
-        std::set<std::string> &m_oSetFilenames;
-        std::string m_osFilename;
-
-        SetFilenameAdder(std::set<std::string> &oSetFilenamesIn,
-                         const std::string &osFilename)
-            : m_oSetFilenames(oSetFilenamesIn), m_osFilename(osFilename)
-        {
-            m_oSetFilenames.insert(osFilename);
-        }
-
-        ~SetFilenameAdder()
-        {
-            m_oSetFilenames.erase(m_osFilename);
-        }
-    };
-
-    // Add osZarrayFilename to oSetFilenamesInLoading during the scope
+    // Add osZarrayFilename to m_poSharedResource during the scope
     // of this function call.
-    SetFilenameAdder filenameAdder(oSetFilenamesInLoading, osZarrayFilename);
+    ZarrSharedResource::SetFilenameAdder filenameAdder(m_poSharedResource,
+                                                       osZarrayFilename);
+    if (!filenameAdder.ok())
+        return nullptr;
 
     const auto osFormat = oRoot["zarr_format"].ToString();
     if (osFormat != "2")
     {
         CPLError(CE_Failure, CPLE_NotSupported,
-                 "Invalid value for zarr_format");
+                 "Invalid value for zarr_format: %s", osFormat.c_str());
         return nullptr;
     }
 
@@ -1374,10 +1356,10 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
     if (!bLoadedFromZMetadata)
     {
         CPLJSONDocument oDoc;
-        const std::string osZattrsFilename(CPLFormFilename(
-            CPLGetDirname(osZarrayFilename.c_str()), ".zattrs", nullptr));
-        CPLErrorHandlerPusher quietError(CPLQuietErrorHandler);
-        CPLErrorStateBackuper errorStateBackuper;
+        const std::string osZattrsFilename(CPLFormFilenameSafe(
+            CPLGetDirnameSafe(osZarrayFilename.c_str()).c_str(), ".zattrs",
+            nullptr));
+        CPLErrorStateBackuper oErrorStateBackuper(CPLQuietErrorHandler);
         if (oDoc.Load(osZattrsFilename))
         {
             oAttributes = oDoc.GetRoot();
@@ -1412,9 +1394,9 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
     const auto arrayDimensionsObj = oAttributes["_ARRAY_DIMENSIONS"];
 
     const auto FindDimension =
-        [this, &aoDims, bLoadedFromZMetadata, &osArrayName, &oAttributes,
-         &oSetFilenamesInLoading](const std::string &osDimName,
-                                  std::shared_ptr<GDALDimension> &poDim, int i)
+        [this, &aoDims, bLoadedFromZMetadata, &osArrayName,
+         &oAttributes](const std::string &osDimName,
+                       std::shared_ptr<GDALDimension> &poDim, int i)
     {
         auto oIter = m_oMapDimensions.find(osDimName);
         if (oIter != m_oMapDimensions.end())
@@ -1465,10 +1447,18 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
             std::string osDirName = m_osDirectoryName;
             while (true)
             {
-                const std::string osArrayFilenameDim =
-                    CPLFormFilename(CPLFormFilename(osDirName.c_str(),
-                                                    osDimName.c_str(), nullptr),
-                                    ".zarray", nullptr);
+                if (CPLHasPathTraversal(osDimName.c_str()))
+                {
+                    CPLError(CE_Failure, CPLE_AppDefined,
+                             "Path traversal detected in %s",
+                             osDimName.c_str());
+                    return false;
+                }
+                const std::string osArrayFilenameDim = CPLFormFilenameSafe(
+                    CPLFormFilenameSafe(osDirName.c_str(), osDimName.c_str(),
+                                        nullptr)
+                        .c_str(),
+                    ".zarray", nullptr);
                 VSIStatBufL sStat;
                 if (VSIStatL(osArrayFilenameDim.c_str(), &sStat) == 0)
                 {
@@ -1476,19 +1466,25 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
                     if (oDoc.Load(osArrayFilenameDim))
                     {
                         LoadArray(osDimName, osArrayFilenameDim, oDoc.GetRoot(),
-                                  false, CPLJSONObject(),
-                                  oSetFilenamesInLoading);
+                                  false, CPLJSONObject());
                     }
                 }
                 else
                 {
+                    if ((cpl::starts_with(osDirName, JSON_REF_FS_PREFIX) ||
+                         cpl::starts_with(osDirName, JSON_REF_FS_PREFIX)) &&
+                        osDirName.back() == '}')
+                    {
+                        break;
+                    }
+
                     // Recurse to upper level for datasets such as
                     // /vsis3/hrrrzarr/sfc/20210809/20210809_00z_anl.zarr/0.1_sigma_level/HAIL_max_fcst/0.1_sigma_level/HAIL_max_fcst
-                    const std::string osDirNameNew =
-                        CPLGetPath(osDirName.c_str());
+                    std::string osDirNameNew =
+                        CPLGetPathSafe(osDirName.c_str());
                     if (!osDirNameNew.empty() && osDirNameNew != osDirName)
                     {
-                        osDirName = osDirNameNew;
+                        osDirName = std::move(osDirNameNew);
                         continue;
                     }
                 }
@@ -1564,7 +1560,7 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
                 auto poNewRG = poRG->m_poParent.lock();
                 if (poNewRG == nullptr)
                     break;
-                poRG = poNewRG;
+                poRG = std::move(poNewRG);
             }
 
             for (int i = 0; i < oShape.Size(); ++i)
@@ -1572,70 +1568,50 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
                 if (arrayDims[i].GetType() == CPLJSONObject::Type::String)
                 {
                     const auto osDimFullpath = arrayDims[i].ToString();
-                    auto poDim = poRG->OpenDimensionFromFullname(osDimFullpath);
-                    if (poDim == nullptr)
+                    const std::string osArrayFullname =
+                        (GetFullName() != "/" ? GetFullName() : std::string()) +
+                        '/' + osArrayName;
+                    if (aoDims.size() == 1 &&
+                        (osDimFullpath == osArrayFullname ||
+                         osDimFullpath == "/" + osArrayFullname))
+                    {
+                        // If this is an indexing variable, then fetch the
+                        // dimension type and direction, and patch the dimension
+                        std::string osType;
+                        std::string osDirection;
+                        ZarrArray::GetDimensionTypeDirection(
+                            oAttributes, osType, osDirection);
+
+                        auto poDimLocal = std::make_shared<ZarrDimension>(
+                            m_poSharedResource,
+                            std::dynamic_pointer_cast<ZarrGroupBase>(
+                                m_pSelf.lock()),
+                            GetFullName(), osArrayName, osType, osDirection,
+                            aoDims[i]->GetSize());
+                        aoDims[i] = poDimLocal;
+
+                        m_oMapDimensions[osArrayName] = std::move(poDimLocal);
+                    }
+                    else if (auto poDim =
+                                 poRG->OpenDimensionFromFullname(osDimFullpath))
+                    {
+                        if (poDim->GetSize() != aoDims[i]->GetSize())
+                        {
+                            CPLError(CE_Failure, CPLE_AppDefined,
+                                     "Inconsistency in size between NCZarr "
+                                     "dimension %s and regular dimension",
+                                     osDimFullpath.c_str());
+                        }
+                        else
+                        {
+                            aoDims[i] = std::move(poDim);
+                        }
+                    }
+                    else
                     {
                         CPLError(CE_Failure, CPLE_AppDefined,
                                  "Cannot find NCZarr dimension %s",
                                  osDimFullpath.c_str());
-                    }
-                    else if (poDim->GetSize() != aoDims[i]->GetSize())
-                    {
-                        CPLError(CE_Failure, CPLE_AppDefined,
-                                 "Inconsistency in size between NCZarr "
-                                 "dimension %s and regular dimension",
-                                 osDimFullpath.c_str());
-                    }
-                    else
-                    {
-                        aoDims[i] = poDim;
-
-                        // If this is an indexing variable, then fetch the
-                        // dimension type and direction, and patch the dimension
-                        const std::string osArrayFullname =
-                            (GetFullName() != "/" ? GetFullName()
-                                                  : std::string()) +
-                            '/' + osArrayName;
-                        if (aoDims.size() == 1 &&
-                            osArrayFullname == poDim->GetFullName())
-                        {
-                            std::string osType;
-                            std::string osDirection;
-                            ZarrArray::GetDimensionTypeDirection(
-                                oAttributes, osType, osDirection);
-
-                            std::string osDimParent = osDimFullpath;
-                            const auto nPos = osDimParent.rfind('/');
-                            if (nPos != std::string::npos)
-                            {
-                                if (nPos == 0)
-                                    osDimParent = '/';
-                                else
-                                    osDimParent.resize(nPos);
-                                auto poDimParentGroup =
-                                    dynamic_cast<ZarrGroupBase *>(
-                                        poRG->OpenGroupFromFullname(osDimParent)
-                                            .get());
-                                if (poDimParentGroup)
-                                {
-                                    auto poDimLocal =
-                                        std::make_shared<ZarrDimension>(
-                                            m_poSharedResource,
-                                            std::dynamic_pointer_cast<
-                                                ZarrGroupBase>(
-                                                poDimParentGroup->m_pSelf
-                                                    .lock()),
-                                            poDimParentGroup->GetFullName(),
-                                            poDim->GetName(), osType,
-                                            osDirection, poDim->GetSize());
-                                    aoDims[i] = poDimLocal;
-
-                                    poDimParentGroup
-                                        ->m_oMapDimensions[poDim->GetName()] =
-                                        poDimLocal;
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -1690,6 +1666,7 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
                 m_oType.FreeDynamicMemory(&m_abyNodata[0]);
         }
     };
+
     NoDataFreer NoDataFreer(abyNoData, oType);
 
     auto oFillValue = oRoot["fill_value"];
@@ -1761,6 +1738,13 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
             {
                 CPLError(CE_Failure, CPLE_AppDefined, "Invalid fill_value");
                 return nullptr;
+            }
+            if (oType.GetNumericDataType() == GDT_Float16)
+            {
+                const GFloat16 hfNoDataValue =
+                    static_cast<GFloat16>(dfNoDataValue);
+                abyNoData.resize(sizeof(hfNoDataValue));
+                memcpy(&abyNoData[0], &hfNoDataValue, sizeof(hfNoDataValue));
             }
             if (oType.GetNumericDataType() == GDT_Float32)
             {
@@ -1884,13 +1868,21 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
             CPLError(CE_Failure, CPLE_AppDefined, "Missing compressor id");
             return nullptr;
         }
-        psCompressor = CPLGetCompressor(osDecompressorId.c_str());
-        psDecompressor = CPLGetDecompressor(osDecompressorId.c_str());
-        if (psCompressor == nullptr || psDecompressor == nullptr)
+        if (osDecompressorId == "imagecodecs_tiff")
         {
-            CPLError(CE_Failure, CPLE_AppDefined, "Decompressor %s not handled",
-                     osDecompressorId.c_str());
-            return nullptr;
+            psDecompressor = ZarrGetTIFFDecompressor();
+        }
+        else
+        {
+            psCompressor = CPLGetCompressor(osDecompressorId.c_str());
+            psDecompressor = CPLGetDecompressor(osDecompressorId.c_str());
+            if (psCompressor == nullptr || psDecompressor == nullptr)
+            {
+                CPLError(CE_Failure, CPLE_AppDefined,
+                         "Decompressor %s not handled",
+                         osDecompressorId.c_str());
+                return nullptr;
+            }
         }
     }
     else
@@ -1920,16 +1912,21 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
                 CPLError(CE_Failure, CPLE_AppDefined, "Missing filter id");
                 return nullptr;
             }
-            const auto psFilterCompressor =
-                CPLGetCompressor(osFilterId.c_str());
-            const auto psFilterDecompressor =
-                CPLGetDecompressor(osFilterId.c_str());
-            if (psFilterCompressor == nullptr ||
-                psFilterDecompressor == nullptr)
+            if (!EQUAL(osFilterId.c_str(), "shuffle") &&
+                !EQUAL(osFilterId.c_str(), "quantize") &&
+                !EQUAL(osFilterId.c_str(), "fixedscaleoffset"))
             {
-                CPLError(CE_Failure, CPLE_AppDefined, "Filter %s not handled",
-                         osFilterId.c_str());
-                return nullptr;
+                const auto psFilterCompressor =
+                    CPLGetCompressor(osFilterId.c_str());
+                const auto psFilterDecompressor =
+                    CPLGetDecompressor(osFilterId.c_str());
+                if (psFilterCompressor == nullptr ||
+                    psFilterDecompressor == nullptr)
+                {
+                    CPLError(CE_Failure, CPLE_AppDefined,
+                             "Filter %s not handled", osFilterId.c_str());
+                    return nullptr;
+                }
             }
         }
     }
@@ -1955,7 +1952,39 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
     {
         poArray->RegisterNoDataValue(abyNoData.data());
     }
-    poArray->ParseSpecialAttributes(oAttributes);
+
+    const auto gridMapping = oAttributes["grid_mapping"];
+    if (gridMapping.GetType() == CPLJSONObject::Type::String)
+    {
+        const std::string gridMappingName = gridMapping.ToString();
+        if (m_oMapMDArrays.find(gridMappingName) == m_oMapMDArrays.end())
+        {
+            if (CPLHasPathTraversal(gridMappingName.c_str()))
+            {
+                CPLError(CE_Failure, CPLE_AppDefined,
+                         "Path traversal detected in %s",
+                         gridMappingName.c_str());
+                return nullptr;
+            }
+            const std::string osArrayFilenameDim = CPLFormFilenameSafe(
+                CPLFormFilenameSafe(m_osDirectoryName.c_str(),
+                                    gridMappingName.c_str(), nullptr)
+                    .c_str(),
+                ".zarray", nullptr);
+            VSIStatBufL sStat;
+            if (VSIStatL(osArrayFilenameDim.c_str(), &sStat) == 0)
+            {
+                CPLJSONDocument oDoc;
+                if (oDoc.Load(osArrayFilenameDim))
+                {
+                    LoadArray(gridMappingName, osArrayFilenameDim,
+                              oDoc.GetRoot(), false, CPLJSONObject());
+                }
+            }
+        }
+    }
+
+    poArray->ParseSpecialAttributes(m_pSelf.lock(), oAttributes);
     poArray->SetAttributes(oAttributes);
     poArray->SetDtype(oDtype);
     RegisterArray(poArray);
@@ -1977,4 +2006,63 @@ ZarrV2Group::LoadArray(const std::string &osArrayName,
     }
 
     return poArray;
+}
+
+/************************************************************************/
+/*                    ZarrV2Array::SetCompressorJson()                  */
+/************************************************************************/
+
+void ZarrV2Array::SetCompressorJson(const CPLJSONObject &oCompressor)
+{
+    m_oCompressorJSon = oCompressor;
+    if (oCompressor.GetType() != CPLJSONObject::Type::Null)
+        m_aosStructuralInfo.SetNameValue("COMPRESSOR",
+                                         oCompressor.ToString().c_str());
+}
+
+/************************************************************************/
+/*                     ZarrV2Array::SetFilters()                        */
+/************************************************************************/
+
+void ZarrV2Array::SetFilters(const CPLJSONArray &oFiltersArray)
+{
+    m_oFiltersArray = oFiltersArray;
+    if (oFiltersArray.Size() > 0)
+        m_aosStructuralInfo.SetNameValue("FILTERS",
+                                         oFiltersArray.ToString().c_str());
+}
+
+/************************************************************************/
+/*                   ZarrV2Array::GetRawBlockInfoInfo()                 */
+/************************************************************************/
+
+CPLStringList ZarrV2Array::GetRawBlockInfoInfo() const
+{
+    CPLStringList aosInfo(m_aosStructuralInfo);
+    if (!m_aoDtypeElts.empty() && m_aoDtypeElts[0].nativeSize > 1 &&
+        m_aoDtypeElts[0].nativeType != DtypeElt::NativeType::STRING_ASCII &&
+        m_aoDtypeElts[0].nativeType != DtypeElt::NativeType::STRING_UNICODE)
+    {
+        if (m_aoDtypeElts[0].needByteSwapping ^ CPL_IS_LSB)
+            aosInfo.SetNameValue("ENDIANNESS", "LITTLE");
+        else
+            aosInfo.SetNameValue("ENDIANNESS", "BIG");
+    }
+    if (m_bFortranOrder)
+    {
+        const int nDims = static_cast<int>(m_aoDims.size());
+        if (nDims > 1)
+        {
+            std::string osOrder("[");
+            for (int i = 0; i < nDims; ++i)
+            {
+                if (i > 0)
+                    osOrder += ',';
+                osOrder += std::to_string(nDims - 1 - i);
+            }
+            osOrder += ']';
+            aosInfo.SetNameValue("TRANSPOSE_ORDER", osOrder.c_str());
+        }
+    }
+    return aosInfo;
 }

@@ -8,29 +8,14 @@
  * Copyright (c) 2002, Frank Warmerdam
  * Copyright (c) 2008-2014, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
 #include "gmlreader.h"
 #include "gmlreaderp.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstddef>
 #include <cstdlib>
@@ -274,7 +259,7 @@ void GMLExpatHandler::DealWithError(OGRErr eErr)
     if (eErr != OGRERR_NONE)
     {
         m_bStopParsing = true;
-        XML_StopParser(m_oParser, XML_FALSE);
+        XML_StopParser(m_oParser, static_cast<XML_Bool>(false));
         if (eErr == OGRERR_NOT_ENOUGH_MEMORY)
             CPLError(CE_Failure, CPLE_OutOfMemory, "Out of memory");
     }
@@ -344,7 +329,7 @@ void XMLCALL GMLExpatHandler::dataHandlerCbk(void *pUserData, const char *data,
         CPLError(CE_Failure, CPLE_AppDefined,
                  "File probably corrupted (million laugh pattern)");
         pThis->m_bStopParsing = true;
-        XML_StopParser(pThis->m_oParser, XML_FALSE);
+        XML_StopParser(pThis->m_oParser, static_cast<XML_Bool>(false));
         return;
     }
 
@@ -357,7 +342,7 @@ void XMLCALL GMLExpatHandler::dataHandlerCbk(void *pUserData, const char *data,
 
 const char *GMLExpatHandler::GetFID(void *attr)
 {
-    const char **papszIter = (const char **)attr;
+    const char *const *papszIter = static_cast<const char *const *>(attr);
     while (*papszIter)
     {
         if (strcmp(*papszIter, "fid") == 0 || strcmp(*papszIter, "gml:id") == 0)
@@ -404,7 +389,7 @@ CPLXMLNode *GMLExpatHandler::AddAttributes(CPLXMLNode *psNode, void *attr)
 char *GMLExpatHandler::GetAttributeValue(void *attr,
                                          const char *pszAttributeName)
 {
-    const char **papszIter = (const char **)attr;
+    const char *const *papszIter = static_cast<const char *const *>(attr);
     while (*papszIter)
     {
         if (strcmp(*papszIter, pszAttributeName) == 0)
@@ -425,7 +410,7 @@ char *GMLExpatHandler::GetAttributeValue(void *attr,
 char *GMLExpatHandler::GetAttributeByIdx(void *attr, unsigned int idx,
                                          char **ppszKey)
 {
-    const char **papszIter = (const char **)attr;
+    const char *const *papszIter = static_cast<const char *const *>(attr);
     if (papszIter[2 * idx] == nullptr)
     {
         *ppszKey = nullptr;
@@ -441,6 +426,7 @@ static const char *const apszGMLGeometryElements[] = {
     "BoundingBox", /* ows:BoundingBox */
     "CompositeCurve",
     "CompositeSurface",
+    "Shell", /* CityGML 3 */
     "Curve",
     "GeometryCollection", /* OGR < 1.8.0 bug... */
     "LineString",
@@ -487,34 +473,11 @@ struct _GeometryNamesStruct
 };
 
 /************************************************************************/
-/*                    GMLHandlerSortGeometryElements()                  */
-/************************************************************************/
-
-static int GMLHandlerSortGeometryElements(const void *_pA, const void *_pB)
-{
-    GeometryNamesStruct *pA = (GeometryNamesStruct *)_pA;
-    GeometryNamesStruct *pB = (GeometryNamesStruct *)_pB;
-    CPLAssert(pA->nHash != pB->nHash);
-    if (pA->nHash < pB->nHash)
-        return -1;
-    else
-        return 1;
-}
-
-/************************************************************************/
 /*                            GMLHandler()                              */
 /************************************************************************/
 
 GMLHandler::GMLHandler(GMLReader *poReader)
-    : m_pszCurField(nullptr), m_nCurFieldAlloc(0), m_nCurFieldLen(0),
-      m_bInCurField(false), m_nAttributeIndex(-1), m_nAttributeDepth(0),
-      m_pszGeometry(nullptr), m_nGeomAlloc(0), m_nGeomLen(0),
-      m_nGeometryDepth(0), m_bAlreadyFoundGeometry(false),
-      m_nGeometryPropertyIndex(0), m_nDepth(0), m_nDepthFeature(0),
-      m_inBoundedByDepth(0), m_pszCityGMLGenericAttrName(nullptr),
-      m_inCityGMLGenericAttrDepth(0), m_bReportHref(false), m_pszHref(nullptr),
-      m_pszUom(nullptr), m_pszValue(nullptr), m_pszKieli(nullptr),
-      pasGeometryNames(static_cast<GeometryNamesStruct *>(
+    : pasGeometryNames(static_cast<GeometryNamesStruct *>(
           CPLMalloc(GML_GEOMETRY_TYPE_COUNT * sizeof(GeometryNamesStruct)))),
       m_nSRSDimensionIfMissing(
           atoi(CPLGetConfigOption("GML_SRS_DIMENSION_IF_MISSING", "0"))),
@@ -526,8 +489,9 @@ GMLHandler::GMLHandler(GMLReader *poReader)
         pasGeometryNames[i].nHash =
             CPLHashSetHashStr(pasGeometryNames[i].pszName);
     }
-    qsort(pasGeometryNames, GML_GEOMETRY_TYPE_COUNT,
-          sizeof(GeometryNamesStruct), GMLHandlerSortGeometryElements);
+    std::sort(pasGeometryNames, pasGeometryNames + GML_GEOMETRY_TYPE_COUNT,
+              [](const GeometryNamesStruct &a, const GeometryNamesStruct &b)
+              { return a.nHash < b.nHash; });
 
     stateStack[0] = STATE_TOP;
 }
@@ -628,39 +592,29 @@ OGRErr GMLHandler::endElement()
     switch (stateStack[nStackDepth])
     {
         case STATE_TOP:
-            return OGRERR_NONE;
             break;
         case STATE_DEFAULT:
             return endElementDefault();
-            break;
         case STATE_FEATURE:
             return endElementFeature();
-            break;
         case STATE_PROPERTY:
             return endElementAttribute();
-            break;
         case STATE_FEATUREPROPERTY:
             return endElementFeatureProperty();
-            break;
         case STATE_GEOMETRY:
             return endElementGeometry();
-            break;
         case STATE_IGNORED_FEATURE:
             return endElementIgnoredFeature();
-            break;
         case STATE_BOUNDED_BY:
             return endElementBoundedBy();
-            break;
         case STATE_BOUNDED_BY_IN_FEATURE:
             return endElementBoundedByInFeature();
-            break;
         case STATE_CITYGML_ATTRIBUTE:
             return endElementCityGMLGenericAttr();
-            break;
         default:
-            return OGRERR_NONE;
             break;
     }
+    return OGRERR_NONE;
 }
 
 /************************************************************************/
@@ -672,39 +626,26 @@ OGRErr GMLHandler::dataHandler(const char *data, int nLen)
     switch (stateStack[nStackDepth])
     {
         case STATE_TOP:
-            return OGRERR_NONE;
-            break;
         case STATE_DEFAULT:
-            return OGRERR_NONE;
-            break;
         case STATE_FEATURE:
-            return OGRERR_NONE;
             break;
         case STATE_PROPERTY:
             return dataHandlerAttribute(data, nLen);
-            break;
         case STATE_FEATUREPROPERTY:
-            return OGRERR_NONE;
             break;
         case STATE_GEOMETRY:
             return dataHandlerGeometry(data, nLen);
-            break;
         case STATE_IGNORED_FEATURE:
-            return OGRERR_NONE;
-            break;
         case STATE_BOUNDED_BY:
-            return OGRERR_NONE;
             break;
         case STATE_BOUNDED_BY_IN_FEATURE:
             return dataHandlerGeometry(data, nLen);
-            break;
         case STATE_CITYGML_ATTRIBUTE:
             return dataHandlerAttribute(data, nLen);
-            break;
         default:
-            return OGRERR_NONE;
             break;
     }
+    return OGRERR_NONE;
 }
 
 #define PUSH_STATE(val)                                                        \
@@ -757,9 +698,10 @@ OGRErr GMLHandler::startElementGeometry(const char *pszName, int nLenName,
     }
 
     /* Create new XML Element */
-    CPLXMLNode *psCurNode = (CPLXMLNode *)CPLCalloc(sizeof(CPLXMLNode), 1);
+    CPLXMLNode *psCurNode =
+        static_cast<CPLXMLNode *>(CPLCalloc(sizeof(CPLXMLNode), 1));
     psCurNode->eType = CXT_Element;
-    psCurNode->pszValue = (char *)CPLMalloc(nLenName + 1);
+    psCurNode->pszValue = static_cast<char *>(CPLMalloc(nLenName + 1));
     memcpy(psCurNode->pszValue, pszName, nLenName + 1);
 
     /* Attach element as the last child of its parent */
@@ -1143,10 +1085,18 @@ int GMLHandler::FindRealPropertyByCheckingConditions(int nIdx, void *attr)
 OGRErr GMLHandler::startElementFeatureAttribute(const char *pszName,
                                                 int nLenName, void *attr)
 {
-    /* Reset flag */
-    m_bInCurField = false;
 
     GMLReadState *poState = m_poReader->GetState();
+
+    if (m_bInCurField && m_nAttributeIndex >= 0 &&
+        std::string_view(pszName, nLenName) == "timePosition")
+    {
+        poState->PushPath(pszName, nLenName);
+        return OGRERR_NONE;
+    }
+
+    /* Reset flag */
+    m_bInCurField = false;
 
     /* -------------------------------------------------------------------- */
     /*      If we are collecting geometry, or if we determine this is a     */
@@ -1218,6 +1168,14 @@ OGRErr GMLHandler::startElementFeatureAttribute(const char *pszName,
                        "RouteSegment") == 0)
                 bReadGeometry = strcmp(pszName, "Curve") == 0;
 
+            // AIXM special case: we want to read both horizontalProjection_location and
+            // horizontalProjection_linearExtent
+            else if (eAppSchemaType == APPSCHEMA_AIXM &&
+                     STARTS_WITH(poState->m_poFeature->GetClass()->GetName(),
+                                 "horizontalProjection_") == 0)
+                bReadGeometry =
+                    STARTS_WITH(pszName, "horizontalProjection_") == 0;
+
             /* For Inspire objects : the "main" geometry is in a <geometry>
              * element */
             else if (m_bAlreadyFoundGeometry)
@@ -1238,7 +1196,6 @@ OGRErr GMLHandler::startElementFeatureAttribute(const char *pszName,
                         poClass->GetGeometryPropertyCount();
                 }
             }
-
             else
             {
                 if (!poClass->IsSchemaLocked() &&
@@ -1275,13 +1232,16 @@ OGRErr GMLHandler::startElementFeatureAttribute(const char *pszName,
             return startElementGeometry(pszName, nLenName, attr);
         }
     }
-    else if (nLenName == 9 && strcmp(pszName, "boundedBy") == 0 &&
-             // We ignore the UseBBOX() flag for CityGML, since CityGML
-             // has elements like bldg:boundedBy, which are not a simple
-             // rectangular bbox. This is needed to read properly
-             // autotest/ogr/data/gml/citygml_lod2_713_5322.xml
-             // (this is a workaround of not being namespace aware)
-             (eAppSchemaType == APPSCHEMA_CITYGML || m_poReader->UseBBOX()))
+    else if (
+        (nLenName == 9 || nLenName == 8) &&
+        (strcmp(pszName, "boundedBy") == 0 ||
+         strcmp(pszName, "boundary") == 0) &&
+        // We ignore the UseBBOX() flag for CityGML, since CityGML
+        // has elements like bldg:boundedBy or 'boundary', which are not a simple
+        // rectangular bbox. This is needed to read properly
+        // autotest/ogr/data/gml/citygml_lod2_713_5322.xml
+        // (this is a workaround of not being namespace aware)
+        (eAppSchemaType == APPSCHEMA_CITYGML || m_poReader->UseBBOX()))
     {
         m_inBoundedByDepth = m_nDepth;
 
@@ -1482,7 +1442,7 @@ OGRErr GMLHandler::startElementDefault(const char *pszName, int nLenName,
     /* WFS 2.0 GetFeature documents have a wfs:FeatureCollection */
     /* as a wfs:member of the top wfs:FeatureCollection. We don't want this */
     /* wfs:FeatureCollection to be recognized as a feature */
-    else if ((!(nLenName == (int)strlen("FeatureCollection") &&
+    else if ((!(nLenName == static_cast<int>(strlen("FeatureCollection")) &&
                 strcmp(pszName, "FeatureCollection") == 0)) &&
              (nClassIndex = m_poReader->GetFeatureElementIndex(
                   pszName, nLenName, eAppSchemaType)) != -1)
@@ -1582,13 +1542,12 @@ OGRErr GMLHandler::endElementBoundedByInFeature()
 }
 
 /************************************************************************/
-/*                       ParseAIXMElevationPoint()                      */
+/*                      ParseAIXMElevationProperties()                  */
 /************************************************************************/
 
-CPLXMLNode *GMLHandler::ParseAIXMElevationPoint(CPLXMLNode *psGML)
+void GMLHandler::ParseAIXMElevationProperties(const CPLXMLNode *psGML)
 {
-    const char *pszElevation = CPLGetXMLValue(psGML, "elevation", nullptr);
-    if (pszElevation)
+    if (const char *pszElevation = CPLGetXMLValue(psGML, "elevation", nullptr))
     {
         m_poReader->SetFeaturePropertyDirectly("elevation",
                                                CPLStrdup(pszElevation), -1);
@@ -1601,9 +1560,8 @@ CPLXMLNode *GMLHandler::ParseAIXMElevationPoint(CPLXMLNode *psGML)
         }
     }
 
-    const char *pszGeoidUndulation =
-        CPLGetXMLValue(psGML, "geoidUndulation", nullptr);
-    if (pszGeoidUndulation)
+    if (const char *pszGeoidUndulation =
+            CPLGetXMLValue(psGML, "geoidUndulation", nullptr))
     {
         m_poReader->SetFeaturePropertyDirectly(
             "geoidUndulation", CPLStrdup(pszGeoidUndulation), -1);
@@ -1615,6 +1573,36 @@ CPLXMLNode *GMLHandler::ParseAIXMElevationPoint(CPLXMLNode *psGML)
                 "geoidUndulation_uom", CPLStrdup(pszGeoidUndulationUnit), -1);
         }
     }
+
+    if (const char *pszVerticalDatum =
+            CPLGetXMLValue(psGML, "verticalDatum", nullptr))
+    {
+        m_poReader->SetFeaturePropertyDirectly("verticalDatum",
+                                               CPLStrdup(pszVerticalDatum), -1);
+    }
+
+    if (const char *pszVerticalAccuracy =
+            CPLGetXMLValue(psGML, "verticalAccuracy", nullptr))
+    {
+        m_poReader->SetFeaturePropertyDirectly(
+            "verticalAccuracy", CPLStrdup(pszVerticalAccuracy), -1);
+        const char *pszVerticalAccuracyUnit =
+            CPLGetXMLValue(psGML, "verticalAccuracy.uom", nullptr);
+        if (pszVerticalAccuracyUnit)
+        {
+            m_poReader->SetFeaturePropertyDirectly(
+                "verticalAccuracy_uom", CPLStrdup(pszVerticalAccuracyUnit), -1);
+        }
+    }
+}
+
+/************************************************************************/
+/*                       ParseAIXMElevationPoint()                      */
+/************************************************************************/
+
+CPLXMLNode *GMLHandler::ParseAIXMElevationPoint(CPLXMLNode *psGML)
+{
+    ParseAIXMElevationProperties(psGML);
 
     const char *pszPos = CPLGetXMLValue(psGML, "pos", nullptr);
     const char *pszCoordinates = CPLGetXMLValue(psGML, "coordinates", nullptr);
@@ -1640,7 +1628,8 @@ OGRErr GMLHandler::endElementGeometry()
 {
     if (m_nGeomLen)
     {
-        CPLXMLNode *psNode = (CPLXMLNode *)CPLCalloc(sizeof(CPLXMLNode), 1);
+        CPLXMLNode *psNode =
+            static_cast<CPLXMLNode *>(CPLCalloc(sizeof(CPLXMLNode), 1));
         psNode->eType = CXT_Text;
         psNode->pszValue = m_pszGeometry;
 
@@ -1685,7 +1674,20 @@ OGRErr GMLHandler::endElementGeometry()
                 // m_oMapElementToSubstitute at the end of the current feature.
                 while (psLastChild->psNext)
                     psLastChild = psLastChild->psNext;
-                psLastChild->psNext = CPLCloneXMLTree(psThisNode);
+                if (psLastChild == psThisNode)
+                {
+                    /* Can happen in situations like:
+                     <foo xlink:href="#X">
+                        <bar gml:id="X"/>
+                     </foo>
+                     Do not attempt substitution as that would cause a memory
+                     leak.
+                    */
+                }
+                else
+                {
+                    psLastChild->psNext = CPLCloneXMLTree(psThisNode);
+                }
                 psThisNode->psNext = psAfter;
             }
         }
@@ -1712,6 +1714,13 @@ OGRErr GMLHandler::endElementGeometry()
             strcmp(psInterestNode->pszValue, "ElevatedPoint") == 0)
         {
             psInterestNode = ParseAIXMElevationPoint(psInterestNode);
+        }
+        else if (eAppSchemaType == APPSCHEMA_AIXM &&
+                 psInterestNode != nullptr &&
+                 (strcmp(psInterestNode->pszValue, "ElevatedCurve") == 0 ||
+                  strcmp(psInterestNode->pszValue, "ElevateSurface") == 0))
+        {
+            ParseAIXMElevationProperties(psInterestNode);
         }
         else if (eAppSchemaType == APPSCHEMA_MTKGML &&
                  psInterestNode != nullptr)
@@ -2107,6 +2116,7 @@ bool GMLHandler::IsGeometryElement(const char *pszElement)
 
     if (eAppSchemaType == APPSCHEMA_AIXM &&
         (strcmp(pszElement, "ElevatedPoint") == 0 ||
+         strcmp(pszElement, "ElevatedCurve") == 0 ||
          strcmp(pszElement, "ElevatedSurface") == 0))
     {
         return true;

@@ -48,6 +48,8 @@ template <> struct ObjectStoreItem<GDALDataset *> {
   shared_ptr<ObjectStoreItem<GDALDataset *>> parent;
   list<long> children;
   AsyncLock async_lock;
+  // Does the dataset need to be closed
+  bool close;
   ObjectStoreItem(Nan::Persistent<Object> &obj);
 };
 
@@ -59,7 +61,7 @@ class ObjectStore {
     public:
   template <typename GDALPTR> long add(GDALPTR ptr, Nan::Persistent<Object> &obj, long parent_uid);
   long add(OGRLayer *ptr, Nan::Persistent<Object> &obj, long parent_uid, bool is_result_set);
-  long add(GDALDataset *ptr, Nan::Persistent<Object> &obj, long parent_uid);
+  long add(GDALDataset *ptr, Nan::Persistent<Object> &obj, long parent_uid, bool close);
 
   void dispose(long uid, bool manual = false);
   bool isAlive(long uid);
@@ -80,8 +82,8 @@ class ObjectStore {
   }
   AsyncLock lockDataset(long uid);
   vector<AsyncLock> lockDatasets(vector<long> uids);
-  AsyncLock tryLockDataset(long uid);
-  vector<AsyncLock> tryLockDatasets(vector<long> uids);
+  AsyncLock tryLockDataset(long uid, bool &result);
+  vector<AsyncLock> tryLockDatasets(vector<long> uids, bool &result);
 
   template <typename GDALPTR> bool has(GDALPTR ptr);
   template <typename GDALPTR> Local<Object> get(GDALPTR ptr);
@@ -96,7 +98,7 @@ class ObjectStore {
   long uid;
   uv_mutex_t master_lock;
   uv_cond_t master_sleep;
-  vector<AsyncLock> _tryLockDatasets(vector<long> uids);
+  vector<AsyncLock> _tryLockDatasets(vector<long> uids, bool &result);
   template <typename GDALPTR> void dispose(shared_ptr<ObjectStoreItem<GDALPTR>> item, bool manual);
   void do_dispose(long uid, bool manual = false);
 };

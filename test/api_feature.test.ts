@@ -3,8 +3,7 @@ import { assert } from 'chai'
 import * as path from 'path'
 
 describe('gdal.Feature', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   let ds: gdal.Dataset, lyr: gdal.Layer, defn: gdal.FeatureDefn, fields: gdal.FieldDefn[]
   before(() => {
@@ -43,6 +42,7 @@ describe('gdal.Feature', () => {
         fields[0].justification = 'invalid'
       }, /Unrecognized justification/)
       assert.strictEqual(fields[0].justification, gdal.OJLeft)
+      fields[0].justification = gdal.OJUndefined
     })
     it('"width" property', () => {
       const def = fields[0].width
@@ -78,12 +78,14 @@ describe('gdal.Feature', () => {
       assert.strictEqual(defn.geomIgnored, false)
       defn.geomIgnored = true
       assert.strictEqual(defn.geomIgnored, true)
+      defn.geomIgnored = false
     })
 
     it('styleIgnored should accept and return a Boolean', () => {
       assert.strictEqual(defn.styleIgnored, false)
       defn.styleIgnored = true
       assert.strictEqual(defn.styleIgnored, true)
+      defn.styleIgnored = false
     })
   })
 
@@ -212,8 +214,8 @@ describe('gdal.Feature', () => {
           const feature = new gdal.Feature(defn)
           assert.throws(() => {
             // In TypeScript these exceptions require disabling the type checks
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (feature as any).defn = null
+            // @ts-expect-error voluntary error
+            feature.defn = null
           })
         })
       })
@@ -230,8 +232,8 @@ describe('gdal.Feature', () => {
         it('should throw error', () => {
           const feature = new gdal.Feature(defn)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (feature as any).fields = null
+            // @ts-expect-error voluntary error
+            feature.fields = null
           }, /fields is a read-only property/)
         })
       })
@@ -341,12 +343,12 @@ describe('gdal.Feature', () => {
           it('should throw an error if the arguments are invalid', () => {
             const feature = new gdal.Feature(defn)
             assert.throws(() => {
-              /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-              (feature.fields as any).set(42)
+              // @ts-expect-error voluntary error
+              feature.fields.set(42)
             }, /expected an object/)
             assert.throws(() => {
-              /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-              (feature.fields as any).set(0, 1, 2)
+              // @ts-expect-error voluntary error
+              feature.fields.set(0, 1, 2)
             }, /Invalid number of arguments/)
           })
         })
@@ -380,8 +382,8 @@ describe('gdal.Feature', () => {
           it('should throw an error with no arguments', () => {
             const feature = new gdal.Feature(defn)
             assert.throws(() => {
-              /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-              (feature.fields as any).get()
+              // @ts-expect-error voluntary error
+              feature.fields.get()
             }, /Field index or name must be given/)
           })
         })
@@ -497,8 +499,8 @@ describe('gdal.Feature', () => {
           it('should throw an error if arguments are invalid', () => {
             const feature = new gdal.Feature(defn)
             assert.throws(() => {
-              /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-              (feature.fields as any).reset('bogus')
+              // @ts-expect-error voluntary error
+              feature.fields.reset('bogus')
             }, /fields must be an object/)
             assert.throws(() => {
               feature.fields.reset({ name: { invalid: true } })
@@ -552,6 +554,23 @@ describe('gdal.Feature', () => {
 				});
 			});
 			*/
+    })
+    describe('style string', () => {
+      it('should get null when unset and allow set/clear', () => {
+        const feature = new gdal.Feature(defn)
+        assert.isNull(feature.getStyleString())
+        feature.setStyleString('PEN(c:#FF0000,w:5px)')
+        assert.equal(feature.getStyleString(), 'PEN(c:#FF0000,w:5px)')
+        feature.setStyleString(null)
+        assert.isNull(feature.getStyleString())
+      })
+      it('should throw when style arg is invalid type', () => {
+        const feature = new gdal.Feature(defn)
+        assert.throws(() => {
+          // @ts-expect-error voluntary error
+          feature.setStyleString(123)
+        }, /style must be a string, null or undefined/)
+      })
     })
     describe('getGeometry()', () => {
       it('should get geometry', () => {

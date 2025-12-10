@@ -1,18 +1,13 @@
 import * as gdal from 'gdal-async'
 import * as path from 'path'
 import * as fs from 'fs'
-import * as chai from 'chai'
-import * as chaiAsPromised from 'chai-as-promised'
-const assert = chai.assert
-chai.use(chaiAsPromised)
+import { assert } from 'chai'
 
 describe('Open', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('vsimem/open', () => {
     let filename, ds: gdal.Dataset, buffer: Buffer
-    /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
 
     it('should not throw', () => {
       filename = path.join(__dirname, 'data/park.geo.json')
@@ -23,10 +18,10 @@ describe('Open', () => {
       assert.equal(ds.layers.count(), 1)
     })
     it('should keep the buffer in the dataset', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      assert.instanceOf((ds as any).buffer, Buffer)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      assert.equal((ds as any).buffer, buffer)
+    // @ts-expect-error not a public API
+      assert.instanceOf(ds.buffer, Buffer)
+      // @ts-expect-error not a public API
+      assert.equal(ds.buffer, buffer)
     })
     it('should throw on an empty buffer', () => {
       const buffer2 = Buffer.alloc(0)
@@ -38,9 +33,9 @@ describe('Open', () => {
     })
     it('should be shareable across datasets', () => {
       const ds2 = gdal.open(buffer)
-      /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-      assert.equal((ds2 as any).buffer, (ds as any).buffer)
-      /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+      // @ts-expect-error not a public API
+      assert.equal(ds2.buffer, ds.buffer)
+
       ds2.close()
     })
     it('layer should have all fields defined', () => {
@@ -57,11 +52,9 @@ describe('Open', () => {
     let filename, ds: Promise<gdal.Dataset>, buffer: Buffer
     after(() => ds.then((r) => {
       r.close()
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      global.gc!()
+          global.gc!()
     }))
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    afterEach(global.gc!)
+    afterEach(() => void global.gc!())
 
     it('should not throw', () => {
       filename = path.join(__dirname, 'data/park.geo.json')
@@ -72,10 +65,10 @@ describe('Open', () => {
       assert.eventually.equal(ds.then((ds) => ds.layers.count()), 1)
     )
     it('should keep the buffer in the dataset', () =>
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      Promise.all([ assert.eventually.instanceOf(ds.then((ds) => (ds as any).buffer), Buffer),
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        assert.eventually.equal(ds.then((ds) => (ds as any).buffer), buffer)
+    // @ts-expect-error not a public API
+      Promise.all([ assert.eventually.instanceOf(ds.then((ds) => ds.buffer), Buffer),
+        // @ts-expect-error not a public API
+        assert.eventually.equal(ds.then((ds) => ds.buffer), buffer)
       ])
     )
     it('should throw on an empty buffer', () => {
@@ -90,8 +83,7 @@ describe('Open', () => {
 })
 
 describe('gdal.vsimem', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('set()', () => {
     it('should create a vsimem file from a Buffer', () => {
@@ -104,8 +96,8 @@ describe('gdal.vsimem', () => {
     })
     it('should throw if the buffer is not a Buffer', () => {
       assert.throws(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        gdal.vsimem.set(({}) as any, '/vsimem/park.geo.json')
+        // @ts-expect-error voluntary error
+        gdal.vsimem.set({}, '/vsimem/park.geo.json')
       })
     })
   })
@@ -121,8 +113,8 @@ describe('gdal.vsimem', () => {
     })
     it('should throw if the buffer is not a Buffer', () => {
       assert.throws(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        gdal.vsimem.copy(({}) as any, '/vsimem/park.geo.json')
+        // @ts-expect-error voluntary error
+        gdal.vsimem.copy({}, '/vsimem/park.geo.json')
       })
     })
   })

@@ -1,18 +1,14 @@
 import * as path from 'path'
 import * as gdal from 'gdal-async'
-import * as chai from 'chai'
+import { assert } from 'chai'
 import * as semver from 'semver'
-const assert = chai.assert
-import * as chaiAsPromised from 'chai-as-promised'
-chai.use(chaiAsPromised)
 
 describe('Open', () => {
   if (!semver.gte(gdal.version, '3.8.0')) {
     return
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('JSONFG', () => {
     let ds: gdal.Dataset

@@ -1,17 +1,13 @@
 import * as fs from 'fs'
 import * as gdal from 'gdal-async'
-import * as chaiAsPromised from 'chai-as-promised'
-import * as chai from 'chai'
-const assert = chai.assert
-chai.use(chaiAsPromised)
+import { assert } from 'chai'
 import * as semver from 'semver'
 
 // http://epsg.io/
 // http://spatialreference.org/ref/
 
 describe('gdal.SpatialReference', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should be exposed', () => {
     assert.ok(gdal.SpatialReference)
@@ -286,9 +282,9 @@ describe('gdal.SpatialReference', () => {
   })
   describe('exportToXML', () => {
     it('should export to XML', () => {
-      const epsg = 3857
+      const epsg = 4326
       const ref = gdal.SpatialReference.fromEPSG(epsg)
-      assert.include(ref.toXML(), 'WGS 84 / Pseudo-Mercator')
+      assert.include(ref.toXML(), 'WGS_1984')
     })
   })
   describe('getAngularUnits', () => {
@@ -410,8 +406,8 @@ describe('gdal.SpatialReference', () => {
     it('should return true if vertical coordinate system', () => {
       assert.equal(gdal.SpatialReference.fromWKT(compoundVertical).isVertical(), true)
       // This is a typo that will probably stay until 4.x
-      /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-      assert.equal((gdal.SpatialReference.fromWKT(compoundVertical) as any).isVectical(), true)
+      // @ts-expect-error breaking change
+      assert.equal((gdal.SpatialReference.fromWKT(compoundVertical)).isVectical(), true)
     })
     it('should return false if not vertical coordinate system', () => {
       assert.equal(gdal.SpatialReference.fromEPSG(2154).isVertical(), false)

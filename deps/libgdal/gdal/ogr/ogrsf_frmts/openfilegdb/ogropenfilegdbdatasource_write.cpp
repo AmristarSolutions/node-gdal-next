@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2022, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_port.h"
@@ -77,7 +61,7 @@ bool OGROpenFileGDBDataSource::GetExistingSpatialRef(
     FETCH_FIELD_IDX(iZTolerance, "ZTolerance", FGFT_FLOAT64);
     FETCH_FIELD_IDX(iMTolerance, "MTolerance", FGFT_FLOAT64);
 
-    int iCurFeat = 0;
+    int64_t iCurFeat = 0;
     while (iCurFeat < oTable.GetTotalRecordCount())
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -246,7 +230,8 @@ bool OGROpenFileGDBDataSource::RemoveRelationshipFromItemRelationships(
     FETCH_FIELD_IDX_WITH_RET(iOriginID, "OriginID", FGFT_GUID, false);
     FETCH_FIELD_IDX_WITH_RET(iDestID, "DestID", FGFT_GUID, false);
 
-    for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount(); ++iCurFeat)
+    for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+         ++iCurFeat)
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
         if (iCurFeat < 0)
@@ -290,7 +275,7 @@ bool OGROpenFileGDBDataSource::LinkDomainToTable(
         FETCH_FIELD_IDX(iOriginID, "OriginID", FGFT_GUID);
         FETCH_FIELD_IDX(iDestID, "DestID", FGFT_GUID);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -331,7 +316,8 @@ bool OGROpenFileGDBDataSource::UnlinkDomainToTable(
     FETCH_FIELD_IDX(iOriginID, "OriginID", FGFT_GUID);
     FETCH_FIELD_IDX(iDestID, "DestID", FGFT_GUID);
 
-    for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount(); ++iCurFeat)
+    for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+         ++iCurFeat)
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
         if (iCurFeat < 0)
@@ -365,7 +351,8 @@ bool OGROpenFileGDBDataSource::UpdateXMLDefinition(
     FETCH_FIELD_IDX(iName, "Name", FGFT_STRING);
     FETCH_FIELD_IDX(iDefinition, "Definition", FGFT_XML);
 
-    for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount(); ++iCurFeat)
+    for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+         ++iCurFeat)
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
         if (iCurFeat < 0)
@@ -406,7 +393,8 @@ bool OGROpenFileGDBDataSource::FindUUIDFromName(const std::string &osName,
     FETCH_FIELD_IDX(iUUID, "UUID", FGFT_GLOBALID);
     FETCH_FIELD_IDX(iName, "Name", FGFT_STRING);
 
-    for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount(); ++iCurFeat)
+    for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+         ++iCurFeat)
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
         if (iCurFeat < 0)
@@ -561,19 +549,25 @@ bool OGROpenFileGDBDataSource::CreateGDBSystemCatalog()
 {
     // Write GDB_SystemCatalog file
     m_osGDBSystemCatalogFilename =
-        CPLFormFilename(m_osDirName.c_str(), "a00000001.gdbtable", nullptr);
+        CPLFormFilenameSafe(m_osDirName.c_str(), "a00000001.gdbtable", nullptr);
     FileGDBTable oTable;
     if (!oTable.Create(m_osGDBSystemCatalogFilename.c_str(), 4, FGTGT_NONE,
                        false, false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ID", std::string(), FGFT_OBJECTID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Name", std::string(), FGFT_STRING, false, 160,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "FileFormat", std::string(), FGFT_INT32, false, 0,
-            FileGDBField::UNSET_FIELD)))
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ID", std::string(), FGFT_OBJECTID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Name", std::string(), FGFT_STRING,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 160, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "FileFormat", std::string(), FGFT_INT32,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)))
     {
         return false;
     }
@@ -597,7 +591,7 @@ bool OGROpenFileGDBDataSource::CreateGDBSystemCatalog()
             return false;
     }
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, m_osGDBSystemCatalogFilename.c_str(), "GDB_SystemCatalog", "", "",
         true));
 
@@ -611,19 +605,25 @@ bool OGROpenFileGDBDataSource::CreateGDBSystemCatalog()
 bool OGROpenFileGDBDataSource::CreateGDBDBTune()
 {
     // Write GDB_DBTune file
-    const std::string osFilename(
-        CPLFormFilename(m_osDirName.c_str(), "a00000002.gdbtable", nullptr));
+    const std::string osFilename(CPLFormFilenameSafe(
+        m_osDirName.c_str(), "a00000002.gdbtable", nullptr));
     FileGDBTable oTable;
     if (!oTable.Create(osFilename.c_str(), 4, FGTGT_NONE, false, false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Keyword", std::string(), FGFT_STRING, false, 32,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ParameterName", std::string(), FGFT_STRING, false, 32,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ConfigString", std::string(), FGFT_STRING, true, 2048,
-            FileGDBField::UNSET_FIELD)))
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Keyword", std::string(), FGFT_STRING,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 32, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ParameterName", std::string(), FGFT_STRING,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 32, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ConfigString", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 2048, FileGDBField::UNSET_FIELD)))
     {
         return false;
     }
@@ -690,7 +690,7 @@ bool OGROpenFileGDBDataSource::CreateGDBDBTune()
             return false;
     }
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, osFilename.c_str(), "GDB_DBTune", "", "", true));
 
     return oTable.Sync();
@@ -704,51 +704,75 @@ bool OGROpenFileGDBDataSource::CreateGDBSpatialRefs()
 {
     // Write GDB_SpatialRefs file
     m_osGDBSpatialRefsFilename =
-        CPLFormFilename(m_osDirName.c_str(), "a00000003.gdbtable", nullptr);
+        CPLFormFilenameSafe(m_osDirName.c_str(), "a00000003.gdbtable", nullptr);
     FileGDBTable oTable;
     if (!oTable.Create(m_osGDBSpatialRefsFilename.c_str(), 4, FGTGT_NONE, false,
                        false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ID", std::string(), FGFT_OBJECTID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "SRTEXT", std::string(), FGFT_STRING, false, 2048,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "FalseX", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "FalseY", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "XYUnits", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "FalseZ", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ZUnits", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "FalseM", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "MUnits", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "XYTolerance", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ZTolerance", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "MTolerance", std::string(), FGFT_FLOAT64, true, 0,
-            FileGDBField::UNSET_FIELD)))
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ID", std::string(), FGFT_OBJECTID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "SRTEXT", std::string(), FGFT_STRING,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 2048, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "FalseX", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "FalseY", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "XYUnits", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "FalseZ", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ZUnits", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "FalseM", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "MUnits", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "XYTolerance", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ZTolerance", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "MTolerance", std::string(), FGFT_FLOAT64,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)))
     {
         return false;
     }
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, m_osGDBSpatialRefsFilename.c_str(), "GDB_SpatialRefs", "", "",
         true));
 
@@ -784,58 +808,90 @@ bool OGROpenFileGDBDataSource::CreateGDBItems()
     }
 
     m_osGDBItemsFilename =
-        CPLFormFilename(m_osDirName.c_str(), "a00000004.gdbtable", nullptr);
+        CPLFormFilenameSafe(m_osDirName.c_str(), "a00000004.gdbtable", nullptr);
     FileGDBTable oTable;
     if (!oTable.Create(m_osGDBItemsFilename.c_str(), 4, FGTGT_POLYGON, false,
                        false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ObjectID", std::string(), FGFT_OBJECTID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "UUID", std::string(), FGFT_GLOBALID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Type", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Name", std::string(), FGFT_STRING, true, 160,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "PhysicalName", std::string(), FGFT_STRING, true, 160,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Path", std::string(), FGFT_STRING, true, 260,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "DatasetSubtype1", std::string(), FGFT_INT32, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "DatasetSubtype2", std::string(), FGFT_INT32, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "DatasetInfo1", std::string(), FGFT_STRING, true, 255,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "DatasetInfo2", std::string(), FGFT_STRING, true, 255,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "URL", std::string(), FGFT_STRING, true, 255,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Definition", std::string(), FGFT_XML, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Documentation", std::string(), FGFT_XML, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ItemInfo", std::string(), FGFT_XML, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Properties", std::string(), FGFT_INT32, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Defaults", std::string(), FGFT_BINARY, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ObjectID", std::string(), FGFT_OBJECTID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "UUID", std::string(), FGFT_GLOBALID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Type", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Name", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 160, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "PhysicalName", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 160, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Path", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 260, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "DatasetSubtype1", std::string(), FGFT_INT32,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "DatasetSubtype2", std::string(), FGFT_INT32,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "DatasetInfo1", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 255, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "DatasetInfo2", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 255, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "URL", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 255, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Definition", std::string(), FGFT_XML,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Documentation", std::string(), FGFT_XML,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ItemInfo", std::string(), FGFT_XML,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Properties", std::string(), FGFT_INT32,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Defaults", std::string(), FGFT_BINARY,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
         !oTable.CreateField(std::move(poGeomField)))
     {
         return false;
@@ -881,7 +937,7 @@ bool OGROpenFileGDBDataSource::CreateGDBItems()
         "</DEWorkspace>");
     fields[14].Integer = 0;
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, m_osGDBItemsFilename.c_str(), "GDB_Items", "", "", true));
 
     return oTable.CreateFeature(fields, nullptr) && oTable.Sync();
@@ -894,22 +950,30 @@ bool OGROpenFileGDBDataSource::CreateGDBItems()
 bool OGROpenFileGDBDataSource::CreateGDBItemTypes()
 {
     // Write GDB_ItemTypes file
-    const std::string osFilename(
-        CPLFormFilename(m_osDirName.c_str(), "a00000005.gdbtable", nullptr));
+    const std::string osFilename(CPLFormFilenameSafe(
+        m_osDirName.c_str(), "a00000005.gdbtable", nullptr));
     FileGDBTable oTable;
     if (!oTable.Create(osFilename.c_str(), 4, FGTGT_NONE, false, false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ObjectID", std::string(), FGFT_OBJECTID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "UUID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ParentTypeID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Name", std::string(), FGFT_STRING, false, 160,
-            FileGDBField::UNSET_FIELD)))
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ObjectID", std::string(), FGFT_OBJECTID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "UUID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ParentTypeID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Name", std::string(), FGFT_STRING,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 160, FileGDBField::UNSET_FIELD)))
     {
         return false;
     }
@@ -995,7 +1059,7 @@ bool OGROpenFileGDBDataSource::CreateGDBItemTypes()
             return false;
     }
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, osFilename.c_str(), "GDB_ItemTypes", "", "", true));
 
     return oTable.Sync();
@@ -1009,36 +1073,50 @@ bool OGROpenFileGDBDataSource::CreateGDBItemRelationships()
 {
     // Write GDB_ItemRelationships file
     m_osGDBItemRelationshipsFilename =
-        CPLFormFilename(m_osDirName.c_str(), "a00000006.gdbtable", nullptr);
+        CPLFormFilenameSafe(m_osDirName.c_str(), "a00000006.gdbtable", nullptr);
     FileGDBTable oTable;
     if (!oTable.Create(m_osGDBItemRelationshipsFilename.c_str(), 4, FGTGT_NONE,
                        false, false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ObjectID", std::string(), FGFT_OBJECTID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "UUID", std::string(), FGFT_GLOBALID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "OriginID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "DestID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Type", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Attributes", std::string(), FGFT_XML, true, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Properties", std::string(), FGFT_INT32, true, 0,
-            FileGDBField::UNSET_FIELD)))
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ObjectID", std::string(), FGFT_OBJECTID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "UUID", std::string(), FGFT_GLOBALID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "OriginID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "DestID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Type", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Attributes", std::string(), FGFT_XML,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Properties", std::string(), FGFT_INT32,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)))
     {
         return false;
     }
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, m_osGDBItemRelationshipsFilename.c_str(), "GDB_ItemRelationships",
         "", "", true));
 
@@ -1052,34 +1130,50 @@ bool OGROpenFileGDBDataSource::CreateGDBItemRelationships()
 bool OGROpenFileGDBDataSource::CreateGDBItemRelationshipTypes()
 {
     // Write GDB_ItemRelationshipTypes file
-    const std::string osFilename(
-        CPLFormFilename(m_osDirName.c_str(), "a00000007.gdbtable", nullptr));
+    const std::string osFilename(CPLFormFilenameSafe(
+        m_osDirName.c_str(), "a00000007.gdbtable", nullptr));
     FileGDBTable oTable;
     if (!oTable.Create(osFilename.c_str(), 4, FGTGT_NONE, false, false) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ObjectID", std::string(), FGFT_OBJECTID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "UUID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "OrigItemTypeID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "DestItemTypeID", std::string(), FGFT_GUID, false, 0,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "Name", std::string(), FGFT_STRING, true, 160,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "ForwardLabel", std::string(), FGFT_STRING, true, 255,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "BackwardLabel", std::string(), FGFT_STRING, true, 255,
-            FileGDBField::UNSET_FIELD)) ||
-        !oTable.CreateField(cpl::make_unique<FileGDBField>(
-            "IsContainment", std::string(), FGFT_INT16, true, 0,
-            FileGDBField::UNSET_FIELD)))
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ObjectID", std::string(), FGFT_OBJECTID,
+            /* bNullable = */ false,
+            /* bRequired = */ true,
+            /* bEditable = */ false, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "UUID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "OrigItemTypeID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "DestItemTypeID", std::string(), FGFT_GUID,
+            /* bNullable = */ false,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "Name", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 160, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "ForwardLabel", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 255, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "BackwardLabel", std::string(), FGFT_STRING,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 255, FileGDBField::UNSET_FIELD)) ||
+        !oTable.CreateField(std::make_unique<FileGDBField>(
+            "IsContainment", std::string(), FGFT_INT16,
+            /* bNullable = */ true,
+            /* bRequired = */ false,
+            /* bEditable = */ true, 0, FileGDBField::UNSET_FIELD)))
     {
         return false;
     }
@@ -1170,7 +1264,7 @@ bool OGROpenFileGDBDataSource::CreateGDBItemRelationshipTypes()
             return false;
     }
 
-    m_apoHiddenLayers.emplace_back(cpl::make_unique<OGROpenFileGDBLayer>(
+    m_apoHiddenLayers.emplace_back(std::make_unique<OGROpenFileGDBLayer>(
         this, osFilename.c_str(), "GDB_ItemRelationshipTypes", "", "", true));
 
     return oTable.Sync();
@@ -1183,7 +1277,7 @@ bool OGROpenFileGDBDataSource::CreateGDBItemRelationshipTypes()
 bool OGROpenFileGDBDataSource::Create(const char *pszName)
 {
 
-    if (!EQUAL(CPLGetExtension(pszName), "gdb"))
+    if (!EQUAL(CPLGetExtensionSafe(pszName).c_str(), "gdb"))
     {
         CPLError(CE_Failure, CPLE_NotSupported,
                  "Extension of the directory should be gdb");
@@ -1205,12 +1299,15 @@ bool OGROpenFileGDBDataSource::Create(const char *pszName)
         return false;
     }
 
+    CPL_IGNORE_RET_VAL(OFGDBGenerateUUID(/* bInit = */ true));
+
     m_osDirName = pszName;
     eAccess = GA_Update;
 
     {
         // Write "gdb" file
-        const std::string osFilename(CPLFormFilename(pszName, "gdb", nullptr));
+        const std::string osFilename(
+            CPLFormFilenameSafe(pszName, "gdb", nullptr));
         VSILFILE *fp = VSIFOpenL(osFilename.c_str(), "wb");
         if (!fp)
             return false;
@@ -1222,7 +1319,7 @@ bool OGROpenFileGDBDataSource::Create(const char *pszName)
     {
         // Write "timestamps" file
         const std::string osFilename(
-            CPLFormFilename(pszName, "timestamps", nullptr));
+            CPLFormFilenameSafe(pszName, "timestamps", nullptr));
         VSILFILE *fp = VSIFOpenL(osFilename.c_str(), "wb");
         if (!fp)
             return false;
@@ -1242,9 +1339,10 @@ bool OGROpenFileGDBDataSource::Create(const char *pszName)
 /*                             ICreateLayer()                           */
 /************************************************************************/
 
-OGRLayer *OGROpenFileGDBDataSource::ICreateLayer(
-    const char *pszLayerName, const OGRSpatialReference *poSRS,
-    OGRwkbGeometryType eType, char **papszOptions)
+OGRLayer *
+OGROpenFileGDBDataSource::ICreateLayer(const char *pszLayerName,
+                                       const OGRGeomFieldDefn *poGeomFieldDefn,
+                                       CSLConstList papszOptions)
 {
     if (eAccess != GA_Update)
         return nullptr;
@@ -1258,13 +1356,16 @@ OGRLayer *OGROpenFileGDBDataSource::ICreateLayer(
         return nullptr;
     }
 
+    auto eType = poGeomFieldDefn ? poGeomFieldDefn->GetType() : wkbNone;
+
     FileGDBTable oTable;
-    if (!oTable.Open(m_osGDBSystemCatalogFilename.c_str(), false))
+    if (!oTable.Open(m_osGDBSystemCatalogFilename.c_str(), false) ||
+        oTable.GetTotalRecordCount() >= INT32_MAX)
         return nullptr;
-    const int nTableNum = 1 + oTable.GetTotalRecordCount();
+    const int nTableNum = static_cast<int>(1 + oTable.GetTotalRecordCount());
     oTable.Close();
 
-    const std::string osFilename(CPLFormFilename(
+    const std::string osFilename(CPLFormFilenameSafe(
         m_osDirName.c_str(), CPLSPrintf("a%08x.gdbtable", nTableNum), nullptr));
 
     if (wkbFlatten(eType) == wkbLineString)
@@ -1274,9 +1375,9 @@ OGRLayer *OGROpenFileGDBDataSource::ICreateLayer(
         eType = OGR_GT_SetModifier(wkbMultiPolygon, OGR_GT_HasZ(eType),
                                    OGR_GT_HasM(eType));
 
-    auto poLayer = cpl::make_unique<OGROpenFileGDBLayer>(
+    auto poLayer = std::make_unique<OGROpenFileGDBLayer>(
         this, osFilename.c_str(), pszLayerName, eType, papszOptions);
-    if (!poLayer->Create(poSRS))
+    if (!poLayer->Create(poGeomFieldDefn))
         return nullptr;
     if (m_bInTransaction)
     {
@@ -1314,7 +1415,7 @@ OGRErr OGROpenFileGDBDataSource::DeleteLayer(int iLayer)
 
         FETCH_FIELD_IDX_WITH_RET(iName, "Name", FGFT_STRING, OGRERR_FAILURE);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -1339,7 +1440,7 @@ OGRErr OGROpenFileGDBDataSource::DeleteLayer(int iLayer)
         FETCH_FIELD_IDX_WITH_RET(iUUID, "UUID", FGFT_GLOBALID, OGRERR_FAILURE);
         FETCH_FIELD_IDX_WITH_RET(iName, "Name", FGFT_STRING, OGRERR_FAILURE);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -1371,7 +1472,7 @@ OGRErr OGROpenFileGDBDataSource::DeleteLayer(int iLayer)
                                  OGRERR_FAILURE);
         FETCH_FIELD_IDX_WITH_RET(iDestID, "DestID", FGFT_GUID, OGRERR_FAILURE);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -1394,9 +1495,10 @@ OGRErr OGROpenFileGDBDataSource::DeleteLayer(int iLayer)
         }
     }
 
-    const std::string osDirname = CPLGetPath(poLayer->GetFilename().c_str());
+    const std::string osDirname =
+        CPLGetPathSafe(poLayer->GetFilename().c_str());
     const std::string osFilenameBase =
-        CPLGetBasename(poLayer->GetFilename().c_str());
+        CPLGetBasenameSafe(poLayer->GetFilename().c_str());
 
     if (m_bInTransaction)
     {
@@ -1424,7 +1526,9 @@ OGRErr OGROpenFileGDBDataSource::DeleteLayer(int iLayer)
     {
         if (STARTS_WITH(*papszIter, osFilenameBase.c_str()))
         {
-            VSIUnlink(CPLFormFilename(osDirname.c_str(), *papszIter, nullptr));
+            VSIUnlink(
+                CPLFormFilenameSafe(osDirname.c_str(), *papszIter, nullptr)
+                    .c_str());
         }
     }
     CSLDestroy(papszFiles);
@@ -1457,7 +1561,7 @@ CPLErr OGROpenFileGDBDataSource::FlushCache(bool /*bAtClosing*/)
 bool OGROpenFileGDBDataSource::AddFieldDomain(
     std::unique_ptr<OGRFieldDomain> &&domain, std::string &failureReason)
 {
-    const auto domainName = domain->GetName();
+    const std::string domainName(domain->GetName());
     if (eAccess != GA_Update)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
@@ -1558,7 +1662,7 @@ bool OGROpenFileGDBDataSource::DeleteFieldDomain(
         FETCH_FIELD_IDX(iType, "Type", FGFT_GUID);
         FETCH_FIELD_IDX(iName, "Name", FGFT_STRING);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -1598,7 +1702,7 @@ bool OGROpenFileGDBDataSource::DeleteFieldDomain(
         FETCH_FIELD_IDX(iDestID, "DestID", FGFT_GUID);
         FETCH_FIELD_IDX(iType, "Type", FGFT_GUID);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -1637,7 +1741,7 @@ bool OGROpenFileGDBDataSource::DeleteFieldDomain(
 bool OGROpenFileGDBDataSource::UpdateFieldDomain(
     std::unique_ptr<OGRFieldDomain> &&domain, std::string &failureReason)
 {
-    const auto domainName = domain->GetName();
+    const std::string domainName(domain->GetName());
     if (eAccess != GA_Update)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
@@ -1670,7 +1774,8 @@ bool OGROpenFileGDBDataSource::UpdateFieldDomain(
     FETCH_FIELD_IDX(iDefinition, "Definition", FGFT_XML);
 
     bool bMatchFound = false;
-    for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount(); ++iCurFeat)
+    for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+         ++iCurFeat)
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
         if (iCurFeat < 0)
@@ -1692,6 +1797,7 @@ bool OGROpenFileGDBDataSource::UpdateFieldDomain(
                 asFields[iDefinition].String = CPLStrdup(osXML.c_str());
 
                 const char *pszNewTypeUUID = "";
+                CPL_IGNORE_RET_VAL(pszNewTypeUUID);  // Make CSA happy
                 switch (domain->GetDomainType())
                 {
                     case OFDT_CODED:
@@ -1779,7 +1885,10 @@ bool OGROpenFileGDBDataSource::AddRelationship(
     std::unique_ptr<GDALRelationship> &&relationship,
     std::string &failureReason)
 {
-    const auto relationshipName = relationship->GetName();
+    if (FlushCache(false) != CE_None)
+        return false;
+
+    const std::string relationshipName(relationship->GetName());
     if (eAccess != GA_Update)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
@@ -1815,12 +1924,13 @@ bool OGROpenFileGDBDataSource::AddRelationship(
     const std::string osThisGUID = OFGDBGenerateUUID();
 
     FileGDBTable oTable;
-    if (!oTable.Open(m_osGDBItemsFilename.c_str(), true))
+    if (!oTable.Open(m_osGDBItemsFilename.c_str(), true) ||
+        oTable.GetTotalRecordCount() >= INT32_MAX)
         return false;
 
     // hopefully this just needs to be a unique value. Seems to autoincrement
     // when created from ArcMap at least!
-    const int iDsId = oTable.GetTotalRecordCount() + 1;
+    const int iDsId = static_cast<int>(oTable.GetTotalRecordCount() + 1);
 
     std::string osMappingTableOidName;
     if (relationship->GetCardinality() ==
@@ -1841,7 +1951,7 @@ bool OGROpenFileGDBDataSource::AddRelationship(
             CPLStringList aosOptions;
             aosOptions.SetNameValue("FID", "RID");
             OGRLayer *poMappingTable = ICreateLayer(
-                relationship->GetName().c_str(), nullptr, wkbNone, aosOptions);
+                relationship->GetName().c_str(), nullptr, aosOptions.List());
             if (!poMappingTable)
             {
                 failureReason = "Could not create mapping table " +
@@ -1999,7 +2109,7 @@ bool OGROpenFileGDBDataSource::DeleteRelationship(const std::string &name,
         FETCH_FIELD_IDX_WITH_RET(iType, "Type", FGFT_GUID, false);
         FETCH_FIELD_IDX_WITH_RET(iName, "Name", FGFT_STRING, false);
 
-        for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+        for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
              ++iCurFeat)
         {
             iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
@@ -2057,7 +2167,7 @@ bool OGROpenFileGDBDataSource::UpdateRelationship(
     std::unique_ptr<GDALRelationship> &&relationship,
     std::string &failureReason)
 {
-    const auto relationshipName = relationship->GetName();
+    const std::string relationshipName(relationship->GetName());
     if (eAccess != GA_Update)
     {
         CPLError(CE_Failure, CPLE_NotSupported,
@@ -2099,12 +2209,15 @@ bool OGROpenFileGDBDataSource::UpdateRelationship(
     }
 
     FileGDBTable oTable;
-    if (!oTable.Open(m_osGDBItemsFilename.c_str(), true))
+    if (!oTable.Open(m_osGDBItemsFilename.c_str(), true) ||
+        oTable.GetTotalRecordCount() >= INT32_MAX)
+    {
         return false;
+    }
 
     // hopefully this just needs to be a unique value. Seems to autoincrement
     // when created from ArcMap at least!
-    const int iDsId = oTable.GetTotalRecordCount() + 1;
+    const int iDsId = static_cast<int>(oTable.GetTotalRecordCount()) + 1;
 
     std::string osMappingTableOidName;
     if (relationship->GetCardinality() ==
@@ -2142,7 +2255,8 @@ bool OGROpenFileGDBDataSource::UpdateRelationship(
 
     bool bMatchFound = false;
     std::string osUUID;
-    for (int iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount(); ++iCurFeat)
+    for (int64_t iCurFeat = 0; iCurFeat < oTable.GetTotalRecordCount();
+         ++iCurFeat)
     {
         iCurFeat = oTable.GetAndSelectNextNonEmptyRow(iCurFeat);
         if (iCurFeat < 0)
@@ -2247,8 +2361,8 @@ OGRErr OGROpenFileGDBDataSource::StartTransaction(int bForce)
         return OGRERR_FAILURE;
     }
 
-    m_osTransactionBackupDirname =
-        CPLFormFilename(m_osDirName.c_str(), ".ogrtransaction_backup", nullptr);
+    m_osTransactionBackupDirname = CPLFormFilenameSafe(
+        m_osDirName.c_str(), ".ogrtransaction_backup", nullptr);
     VSIStatBufL sStat;
     if (VSIStatL(m_osTransactionBackupDirname.c_str(), &sStat) == 0)
     {
@@ -2285,15 +2399,15 @@ bool OGROpenFileGDBDataSource::BackupSystemTablesForTransaction()
     for (char **papszIter = papszFiles;
          papszIter != nullptr && *papszIter != nullptr; ++papszIter)
     {
-        const std::string osBasename = CPLGetBasename(*papszIter);
+        const std::string osBasename = CPLGetBasenameSafe(*papszIter);
         if (osBasename.size() == strlen("a00000001") &&
             osBasename.compare(0, 8, "a0000000") == 0 && osBasename[8] >= '1' &&
             osBasename[8] <= '8')
         {
-            std::string osDestFilename = CPLFormFilename(
+            const std::string osDestFilename = CPLFormFilenameSafe(
                 m_osTransactionBackupDirname.c_str(), *papszIter, nullptr);
-            std::string osSourceFilename =
-                CPLFormFilename(m_osDirName.c_str(), *papszIter, nullptr);
+            const std::string osSourceFilename =
+                CPLFormFilenameSafe(m_osDirName.c_str(), *papszIter, nullptr);
             if (CPLCopyFile(osDestFilename.c_str(), osSourceFilename.c_str()) !=
                 0)
             {
@@ -2361,14 +2475,14 @@ OGRErr OGROpenFileGDBDataSource::RollbackTransaction()
         for (char **papszIter = papszFiles;
              papszIter != nullptr && *papszIter != nullptr; ++papszIter)
         {
-            const std::string osBasename = CPLGetBasename(*papszIter);
+            const std::string osBasename = CPLGetBasenameSafe(*papszIter);
             if (osBasename.size() == strlen("a00000001") &&
                 osBasename.compare(0, 8, "a0000000") == 0 &&
                 osBasename[8] >= '1' && osBasename[8] <= '8')
             {
-                std::string osDestFilename =
-                    CPLFormFilename(m_osDirName.c_str(), *papszIter, nullptr);
-                std::string osSourceFilename = CPLFormFilename(
+                const std::string osDestFilename = CPLFormFilenameSafe(
+                    m_osDirName.c_str(), *papszIter, nullptr);
+                const std::string osSourceFilename = CPLFormFilenameSafe(
                     m_osTransactionBackupDirname.c_str(), *papszIter, nullptr);
                 if (CPLCopyFile(osDestFilename.c_str(),
                                 osSourceFilename.c_str()) != 0)
@@ -2390,18 +2504,18 @@ OGRErr OGROpenFileGDBDataSource::RollbackTransaction()
     for (auto poLayer : m_oSetLayersCreatedInTransaction)
     {
         const std::string osThisBasename =
-            CPLGetBasename(poLayer->GetFilename().c_str());
+            CPLGetBasenameSafe(poLayer->GetFilename().c_str());
         poLayer->Close();
 
         char **papszFiles = VSIReadDir(m_osDirName.c_str());
         for (char **papszIter = papszFiles;
              papszIter != nullptr && *papszIter != nullptr; ++papszIter)
         {
-            const std::string osBasename = CPLGetBasename(*papszIter);
+            const std::string osBasename = CPLGetBasenameSafe(*papszIter);
             if (osBasename == osThisBasename)
             {
-                std::string osDestFilename =
-                    CPLFormFilename(m_osDirName.c_str(), *papszIter, nullptr);
+                const std::string osDestFilename = CPLFormFilenameSafe(
+                    m_osDirName.c_str(), *papszIter, nullptr);
                 VSIUnlink(osDestFilename.c_str());
             }
         }

@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2023, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef S100_H
@@ -31,8 +15,41 @@
 
 #include "cpl_port.h"
 
+#include "gdal_pam.h"
 #include "gdal_priv.h"
 #include "ogr_spatialref.h"
+
+/************************************************************************/
+/*                            S100BaseDataset                           */
+/************************************************************************/
+
+class S100BaseDataset CPL_NON_FINAL : public GDALPamDataset
+{
+  private:
+    void ReadSRS();
+
+  protected:
+    std::string m_osFilename{};
+    std::shared_ptr<GDALGroup> m_poRootGroup{};
+    OGRSpatialReference m_oSRS{};
+    bool m_bHasGT = false;
+    GDALGeoTransform m_gt{};
+    std::string m_osMetadataFile{};
+
+    explicit S100BaseDataset(const std::string &osFilename);
+
+    bool Init();
+
+  public:
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
+    const OGRSpatialReference *GetSpatialRef() const override;
+
+    char **GetFileList() override;
+};
+
+bool S100GetNumPointsLongitudinalLatitudinal(const GDALGroup *poGroup,
+                                             int &nNumPointsLongitudinal,
+                                             int &nNumPointsLatitudinal);
 
 bool S100ReadSRS(const GDALGroup *poRootGroup, OGRSpatialReference &oSRS);
 
@@ -41,7 +58,16 @@ bool S100GetDimensions(
     std::vector<std::shared_ptr<GDALDimension>> &apoDims,
     std::vector<std::shared_ptr<GDALMDArray>> &apoIndexingVars);
 
-bool S100GetGeoTransform(const GDALGroup *poGroup, double adfGeoTransform[6],
+bool S100GetGeoTransform(const GDALGroup *poGroup, GDALGeoTransform &gt,
                          bool bNorthUp);
+
+constexpr const char *S100_VERTICAL_DATUM_MEANING = "VERTICAL_DATUM_MEANING";
+constexpr const char *S100_VERTICAL_DATUM_ABBREV = "VERTICAL_DATUM_ABBREV";
+constexpr const char *S100_VERTICAL_DATUM_NAME = "VERTICAL_DATUM_NAME";
+
+void S100ReadVerticalDatum(GDALMajorObject *poMO, const GDALGroup *poGroup);
+
+std::string S100ReadMetadata(GDALDataset *poDS, const std::string &osFilename,
+                             const GDALGroup *poRootGroup);
 
 #endif  // S100_H

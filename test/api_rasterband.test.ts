@@ -4,8 +4,7 @@ import * as gdal from 'gdal-async'
 import * as fileUtils from './utils/file'
 
 describe('gdal.RasterBand', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   it('should not be instantiable', () => {
     assert.throws(() => {
@@ -26,8 +25,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).ds = null
+            // @ts-expect-error voluntary error
+            band.ds = null
           })
         })
       })
@@ -174,8 +173,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open(`${__dirname}/data/dem_azimuth50_pa.img`)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).description = 'test'
+            // @ts-expect-error voluntary error
+            band.description = 'test'
           })
         })
       })
@@ -201,8 +200,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).id = 5
+            // @ts-expect-error voluntary error
+            band.id = 5
           })
         })
       })
@@ -228,8 +227,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).size = { x: 128, y: 128 }
+            // @ts-expect-error voluntary error
+            band.size = { x: 128, y: 128 }
           })
         })
       })
@@ -255,8 +254,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).blockSize = { x: 128, y: 128 }
+            // @ts-expect-error voluntary error
+            band.blockSize = { x: 128, y: 128 }
           })
         })
       })
@@ -323,8 +322,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).dataType = gdal.GDT_Float64
+            // @ts-expect-error voluntary error
+            band.dataType = gdal.GDT_Float64
           })
         })
       })
@@ -355,8 +354,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).readOnly = true
+            // @ts-expect-error voluntary error
+            band.readOnly = true
           })
         })
       })
@@ -382,8 +381,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).minimum = 5
+            // @ts-expect-error voluntary error
+            band.minimum = 5
           })
         })
       })
@@ -409,8 +408,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).maximum = 5
+            // @ts-expect-error voluntary error
+            band.maximum = 5
           })
         })
       })
@@ -553,8 +552,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 256, 256, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).pixels = null
+            // @ts-expect-error voluntary error
+            band.pixels = null
           })
         })
       })
@@ -616,8 +615,110 @@ describe('gdal.RasterBand', () => {
           assert.equal(data.length, w * h)
           assert.equal(data[10 * 20 + 10], 10)
         })
+        it('should support creating BigInt64Array with GDAL >= 3.5', function () {
+          if (semver.gte(gdal.version, '3.5.0')) {
+            const ds = gdal.open(`${__dirname}/data/sample.tif`)
+            const band = ds.bands.get(1)
+            const w = 20
+            const h = 30
+            const data = band.pixels.read<BigInt64Array>(190, 290, w, h, undefined, { data_type: gdal.GDT_Int64 })
+            assert.instanceOf(data, BigInt64Array)
+            assert.equal(data.length, w * h)
+            assert.equal(data[10 * 20 + 10], 10n)
+          } else {
+            this.skip()
+          }
+        })
+        it('should support reading UInt64 with GDAL >= 3.5', function () {
+          if (semver.gte(gdal.version, '3.5.0')) {
+            const ds = gdal.open(`${__dirname}/data/sample.tif`)
+            const band = ds.bands.get(1)
+            const w = 20
+            const h = 30
+            const data = new BigUint64Array(new ArrayBuffer(w * h * BigUint64Array.BYTES_PER_ELEMENT))
+            band.pixels.read(190, 290, w, h, data)
+            assert.instanceOf(data, BigUint64Array)
+            assert.equal(data.length, w * h)
+            assert.equal(data[10 * 20 + 10], 10n)
+          } else {
+            this.skip()
+          }
+        })
+        it('should support reading Int64 with GDAL >= 3.5 and fail graciously with GDAL < 3.5', () => {
+          const ds = gdal.open(`${__dirname}/data/sample.tif`)
+          const band = ds.bands.get(1)
+          const w = 20
+          const h = 30
+          const data = new BigInt64Array(new ArrayBuffer(w * h * BigInt64Array.BYTES_PER_ELEMENT))
+          if (semver.gte(gdal.version, '3.5.0')) {
+            band.pixels.read(190, 290, w, h, data)
+            assert.instanceOf(data, BigInt64Array)
+            assert.equal(data.length, w * h)
+            assert.equal(data[10 * 20 + 10], 10n)
+          } else {
+            assert.throws(() => {
+              band.pixels.read(190, 290, w, h, data)
+            }, /Invalid GDAL data type/)
+          }
+        })
+        // With Node.js <24, Float16 uses a polyfill
+        // https://www.npmjs.com/package/@petamoriken/float16
+        it('should support reading Float16 with GDAL >= 3.11 and fail graciously with GDAL < 3.11', () => {
+          const ds = gdal.open(`${__dirname}/data/sample.tif`)
+          const band = ds.bands.get(1)
+          const w = 20
+          const h = 30
+          const data = new gdal.Float16Array(new ArrayBuffer(w * h * gdal.Float16Array.BYTES_PER_ELEMENT))
+          if (semver.gte(gdal.version, '3.11.0')) {
+            band.pixels.read(190, 290, w, h, data)
+            assert.instanceOf(data, gdal.Float16Array)
+            assert.equal(data.length, w * h)
+            assert.equal(data[10 * 20 + 10], 10)
+          } else {
+            assert.throws(() => {
+              band.pixels.read(190, 290, w, h, data)
+            }, /Invalid GDAL data type/)
+          }
+        })
+        it('should support creating Float16 with GDAL >= 3.11 / Node.js 24+ and fail graciously with GDAL < 3.11 or Node.js < 24', () => {
+          const ds = gdal.open(`${__dirname}/data/sample.tif`)
+          const band = ds.bands.get(1)
+          const w = 20
+          const h = 30
+          if (semver.gte(gdal.version, '3.11.0') && semver.gte(process.versions.node, '24.0.0')) {
+            const data = band.pixels.read(190, 290, w, h, undefined, { data_type: gdal.GDT_Float16 })
+            assert.instanceOf(data, gdal.Float16Array)
+            assert.equal(data.length, w * h)
+            assert.equal(data[10 * 20 + 10], 10)
+          } else {
+            assert.throws(() => {
+              band.pixels.read(190, 290, w, h, undefined, { data_type: 'GDT_Float16' })
+            })
+          }
+        })
+        it('should have native Float16Array support with Node.js 24+', function () {
+          if (semver.gte(process.versions.node, '24.0.0')) {
+            assert.strictEqual(gdal.Float16Array, globalThis.Float16Array)
+          } else {
+            this.skip()
+          }
+        })
+        it('should support setting GDAL_CACHEMAX to a percentage', () => {
+          gdal.config.set('GDAL_CACHEMAX', '20%')
+          const ds = gdal.open(`${__dirname}/data/sample.tif`)
+          const band = ds.bands.get(1)
+          const w = 20
+          const h = 30
+          const data = new Float64Array(new ArrayBuffer(w * h * Float64Array.BYTES_PER_ELEMENT))
+          band.pixels.read(190, 290, w, h, data)
+          assert.isNull(gdal.lastError)
+          assert.instanceOf(data, Float64Array)
+          assert.equal(data.length, w * h)
+          assert.equal(data[10 * 20 + 10], 10)
+          gdal.config.set('GDAL_CACHEMAX', null)
+        })
         describe('w/data over 4GB', function () {
-          this.timeout(30000)
+          this.timeout(120000)
           // These tests require at least 16GB of memory to be reliable
           const size = 66000
           it('when returning a new TypedArray', () => {
@@ -654,7 +755,16 @@ describe('gdal.RasterBand', () => {
                 ds.rasterSize.x / 2, ds.rasterSize.y / 2, data)
             }, /Array length must be greater than/)
           })
-          it('w/file over the 4G elements limit', () => {
+          it('w/file over the 4G elements limit', function () {
+            if (semver.gte(process.versions.node, '22.0.0')) {
+              // It seems that Node.js 22 (V8?) has removed the 32-bit index restrictions
+              // on TypedArrays
+              // (but not on Arrays which are part of the JavaScript specification)
+              // The new limit is Number.MAX_SAFE_INTEGER which is 8P (Peta) elements
+              // so there is nothing to test in this case
+              // (I can't find any official announcement, but testing confirms it)
+              this.skip()
+            }
             const ds = gdal.open(`${__dirname}/data/huge-sparse.tiff`)
             const band = ds.bands.get(1)
             assert.deepEqual(ds.rasterSize, { x: size, y: size })
@@ -879,7 +989,7 @@ describe('gdal.RasterBand', () => {
                 gdal.GDT_Byte
               )
               const band = ds.bands.get(1)
-              const data = band.pixels.read(0, 0, 20, 30, undefined, {
+              const data = band.pixels.read<Uint8Array>(0, 0, 20, 30, undefined, {
                 buffer_width: 10,
                 buffer_height: 15
               })
@@ -1096,7 +1206,7 @@ describe('gdal.RasterBand', () => {
           }
         })
         it('should not fail when writing more than 4GB', function () {
-          this.timeout(30000)
+          this.timeout(60000)
           if (semver.lt(gdal.version, '3.6.0')) {
             this.skip()
           }
@@ -1276,10 +1386,10 @@ describe('gdal.RasterBand', () => {
             it('should support non-standard resampling', () => {
               let i
 
-              let data
-              data = band_stripes.pixels.read(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Average })
+              let data: Uint8Array
+              data = band_stripes.pixels.read<Uint8Array>(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Average })
               for (i = 0; i < data.length; i++) assert.equal(data[i], 50)
-              data = band_stripes.pixels.read(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Bilinear })
+              data = band_stripes.pixels.read<Uint8Array>(0, 0, w, h, undefined, { buffer_width: w / 4, buffer_height: h / 4, resampling: gdal.GRA_Bilinear })
               for (i = 0; i < data.length; i++) assert.include([ 46, 54 ], data[i])
             })
           })
@@ -1290,7 +1400,7 @@ describe('gdal.RasterBand', () => {
               const band = ds1.bands.get(1)
               let calls = 0
               let prevComplete = 0
-              data = band.pixels.read(0, 0, ds1.rasterSize.x, ds1.rasterSize.y, undefined, {
+              data = band.pixels.read<Uint8Array>(0, 0, ds1.rasterSize.x, ds1.rasterSize.y, undefined, {
                 progress_cb: (complete): void => {
                   calls++
                   assert.isAbove(complete, prevComplete)
@@ -1504,8 +1614,8 @@ describe('gdal.RasterBand', () => {
           const ds = gdal.open('temp', 'w', 'MEM', 32, 32, 1, gdal.GDT_Byte)
           const band = ds.bands.get(1)
           assert.throws(() => {
-            /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-            (band as any).overviews = null
+            // @ts-expect-error voluntary error
+            band.overviews = null
           })
         })
       })
@@ -1606,7 +1716,7 @@ describe('gdal.RasterBand', () => {
           ds.close()
           gdal.vsimem.release(tempFile)
           assert.throws(() => {
-            for (const overview of band.overviews) overview
+            for (const overview of band.overviews) void overview
           })
         })
       })
@@ -1725,6 +1835,7 @@ describe('gdal.RasterBand', () => {
         const band = gdal.open(`${__dirname}/data/test_with_mask_1bit.tif`).bands.get(1)
         assert.equal(band.getMaskFlags(), 2)
         const mask = band.getMaskBand()
+        assert.isNotNull(mask)
         assert.equal(mask.pixels.get(0, 0), 0)
         assert.equal(mask.pixels.get(10, 10), 255)
       })

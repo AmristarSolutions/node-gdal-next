@@ -9,23 +9,7 @@
  * Copyright (c) 2006, Kevin Locke <kwl7@cornell.edu>
  * Copyright (c) 2008-2012, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_conv.h"
@@ -37,6 +21,10 @@
 
 #include "gdal_frmts.h"
 #include "gdal_pam.h"
+#include "gdal_driver.h"
+#include "gdal_drivermanager.h"
+#include "gdal_openinfo.h"
+#include "gdal_cpp_functions.h"
 
 /************************************************************************/
 /* ==================================================================== */
@@ -53,17 +41,16 @@ class GSBGDataset final : public GDALPamDataset
     static const float fNODATA_VALUE;
     static const size_t nHEADER_SIZE;
 
-    static CPLErr WriteHeader(VSILFILE *fp, GInt16 nXSize, GInt16 nYSize,
+    static CPLErr WriteHeader(VSILFILE *fp, int nXSize, int nYSize,
                               double dfMinX, double dfMaxX, double dfMinY,
                               double dfMaxY, double dfMinZ, double dfMaxZ);
 
-    VSILFILE *fp;
+    VSILFILE *fp = nullptr;
 
   public:
-    GSBGDataset() : fp(nullptr)
-    {
-    }
-    ~GSBGDataset();
+    GSBGDataset() = default;
+
+    ~GSBGDataset() override;
 
     static int Identify(GDALOpenInfo *);
     static GDALDataset *Open(GDALOpenInfo *);
@@ -76,8 +63,8 @@ class GSBGDataset final : public GDALPamDataset
                                    GDALProgressFunc pfnProgress,
                                    void *pProgressData);
 
-    CPLErr GetGeoTransform(double *padfGeoTransform) override;
-    CPLErr SetGeoTransform(double *padfGeoTransform) override;
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
+    CPLErr SetGeoTransform(const GDALGeoTransform &gt) override;
 };
 
 /* NOTE:  This is not mentioned in the spec, but Surfer 8 uses this value */
@@ -112,7 +99,7 @@ class GSBGRasterBand final : public GDALPamRasterBand
 
   public:
     GSBGRasterBand(GSBGDataset *, int);
-    ~GSBGRasterBand();
+    ~GSBGRasterBand() override;
 
     CPLErr IReadBlock(int, int, void *) override;
     CPLErr IWriteBlock(int, int, void *) override;
@@ -199,7 +186,7 @@ CPLErr GSBGRasterBand::ScanForMinMaxZ()
                 pafRowMaxZ[iRow] = pafRowVals[iCol];
 
             dfSum += pafRowVals[iCol];
-            dfSum2 += pafRowVals[iCol] * pafRowVals[iCol];
+            dfSum2 += static_cast<double>(pafRowVals[iCol]) * pafRowVals[iCol];
             nValuesRead++;
         }
 
@@ -249,7 +236,7 @@ CPLErr GSBGRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     if (nBlockYOff < 0 || nBlockYOff > nRasterYSize - 1 || nBlockXOff != 0)
         return CE_Failure;
 
-    GSBGDataset *poGDS = reinterpret_cast<GSBGDataset *>(poDS);
+    GSBGDataset *poGDS = cpl::down_cast<GSBGDataset *>(poDS);
     if (VSIFSeekL(poGDS->fp,
                   GSBGDataset::nHEADER_SIZE +
                       4 * static_cast<vsi_l_offset>(nRasterXSize) *
@@ -323,7 +310,8 @@ CPLErr GSBGRasterBand::IWriteBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 
     if (VSIFSeekL(poGDS->fp,
                   GSBGDataset::nHEADER_SIZE +
-                      4 * nRasterXSize * (nRasterYSize - nBlockYOff - 1),
+                      static_cast<vsi_l_offset>(4) * nRasterXSize *
+                          (nRasterYSize - nBlockYOff - 1),
                   SEEK_SET) != 0)
     {
         CPLError(CE_Failure, CPLE_FileIO,
@@ -415,9 +403,9 @@ CPLErr GSBGRasterBand::IWriteBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 
     if (bHeaderNeedsUpdate && dfMaxZ > dfMinZ)
     {
-        CPLErr eErr = poGDS->WriteHeader(poGDS->fp, (GInt16)nRasterXSize,
-                                         (GInt16)nRasterYSize, dfMinX, dfMaxX,
-                                         dfMinY, dfMaxY, dfMinZ, dfMaxZ);
+        CPLErr eErr =
+            poGDS->WriteHeader(poGDS->fp, nRasterXSize, nRasterYSize, dfMinX,
+                               dfMaxX, dfMinY, dfMaxY, dfMinZ, dfMaxZ);
         return eErr;
     }
 
@@ -506,7 +494,7 @@ GDALDataset *GSBGDataset::Open(GDALOpenInfo *poOpenInfo)
     /* -------------------------------------------------------------------- */
     /*      Create a corresponding GDALDataset.                             */
     /* -------------------------------------------------------------------- */
-    auto poDS = cpl::make_unique<GSBGDataset>();
+    auto poDS = std::make_unique<GSBGDataset>();
 
     poDS->eAccess = poOpenInfo->eAccess;
     poDS->fp = poOpenInfo->fpL;
@@ -617,16 +605,14 @@ GDALDataset *GSBGDataset::Open(GDALOpenInfo *poOpenInfo)
 /*                          GetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr GSBGDataset::GetGeoTransform(double *padfGeoTransform)
+CPLErr GSBGDataset::GetGeoTransform(GDALGeoTransform &gt) const
 {
-    if (padfGeoTransform == nullptr)
-        return CE_Failure;
-
-    GSBGRasterBand *poGRB = cpl::down_cast<GSBGRasterBand *>(GetRasterBand(1));
+    const GSBGRasterBand *poGRB =
+        cpl::down_cast<const GSBGRasterBand *>(GetRasterBand(1));
 
     /* check if we have a PAM GeoTransform stored */
     CPLPushErrorHandler(CPLQuietErrorHandler);
-    CPLErr eErr = GDALPamDataset::GetGeoTransform(padfGeoTransform);
+    CPLErr eErr = GDALPamDataset::GetGeoTransform(gt);
     CPLPopErrorHandler();
 
     if (eErr == CE_None)
@@ -636,16 +622,16 @@ CPLErr GSBGDataset::GetGeoTransform(double *padfGeoTransform)
         return CE_Failure;
 
     /* calculate pixel size first */
-    padfGeoTransform[1] = (poGRB->dfMaxX - poGRB->dfMinX) / (nRasterXSize - 1);
-    padfGeoTransform[5] = (poGRB->dfMinY - poGRB->dfMaxY) / (nRasterYSize - 1);
+    gt[1] = (poGRB->dfMaxX - poGRB->dfMinX) / (nRasterXSize - 1);
+    gt[5] = (poGRB->dfMinY - poGRB->dfMaxY) / (nRasterYSize - 1);
 
     /* then calculate image origin */
-    padfGeoTransform[0] = poGRB->dfMinX - padfGeoTransform[1] / 2;
-    padfGeoTransform[3] = poGRB->dfMaxY - padfGeoTransform[5] / 2;
+    gt[0] = poGRB->dfMinX - gt[1] / 2;
+    gt[3] = poGRB->dfMaxY - gt[5] / 2;
 
     /* tilt/rotation does not supported by the GS grids */
-    padfGeoTransform[4] = 0.0;
-    padfGeoTransform[2] = 0.0;
+    gt[4] = 0.0;
+    gt[2] = 0.0;
 
     return CE_None;
 }
@@ -654,7 +640,7 @@ CPLErr GSBGDataset::GetGeoTransform(double *padfGeoTransform)
 /*                          SetGeoTransform()                           */
 /************************************************************************/
 
-CPLErr GSBGDataset::SetGeoTransform(double *padfGeoTransform)
+CPLErr GSBGDataset::SetGeoTransform(const GDALGeoTransform &gt)
 {
     if (eAccess == GA_ReadOnly)
     {
@@ -665,28 +651,23 @@ CPLErr GSBGDataset::SetGeoTransform(double *padfGeoTransform)
 
     GSBGRasterBand *poGRB = cpl::down_cast<GSBGRasterBand *>(GetRasterBand(1));
 
-    if (padfGeoTransform == nullptr)
-        return CE_Failure;
-
     /* non-zero transform 2 or 4 or negative 1 or 5 not supported natively */
     // CPLErr eErr = CE_None;
-    /*if( padfGeoTransform[2] != 0.0 || padfGeoTransform[4] != 0.0
-        || padfGeoTransform[1] < 0.0 || padfGeoTransform[5] < 0.0 )
-        eErr = GDALPamDataset::SetGeoTransform( padfGeoTransform );
+    /*if( gt[2] != 0.0 || gt[4] != 0.0
+        || gt[1] < 0.0 || gt[5] < 0.0 )
+        eErr = GDALPamDataset::SetGeoTransform( gt );
 
     if( eErr != CE_None )
         return eErr;*/
 
-    double dfMinX = padfGeoTransform[0] + padfGeoTransform[1] / 2;
-    double dfMaxX =
-        padfGeoTransform[1] * (nRasterXSize - 0.5) + padfGeoTransform[0];
-    double dfMinY =
-        padfGeoTransform[5] * (nRasterYSize - 0.5) + padfGeoTransform[3];
-    double dfMaxY = padfGeoTransform[3] + padfGeoTransform[5] / 2;
+    double dfMinX = gt[0] + gt[1] / 2;
+    double dfMaxX = gt[1] * (nRasterXSize - 0.5) + gt[0];
+    double dfMinY = gt[5] * (nRasterYSize - 0.5) + gt[3];
+    double dfMaxY = gt[3] + gt[5] / 2;
 
-    CPLErr eErr = WriteHeader(fp, (GInt16)poGRB->nRasterXSize,
-                              (GInt16)poGRB->nRasterYSize, dfMinX, dfMaxX,
-                              dfMinY, dfMaxY, poGRB->dfMinZ, poGRB->dfMaxZ);
+    CPLErr eErr =
+        WriteHeader(fp, poGRB->nRasterXSize, poGRB->nRasterYSize, dfMinX,
+                    dfMaxX, dfMinY, dfMaxY, poGRB->dfMinZ, poGRB->dfMaxZ);
 
     if (eErr == CE_None)
     {
@@ -703,7 +684,7 @@ CPLErr GSBGDataset::SetGeoTransform(double *padfGeoTransform)
 /*                             WriteHeader()                            */
 /************************************************************************/
 
-CPLErr GSBGDataset::WriteHeader(VSILFILE *fp, GInt16 nXSize, GInt16 nYSize,
+CPLErr GSBGDataset::WriteHeader(VSILFILE *fp, int nXSize, int nYSize,
                                 double dfMinX, double dfMaxX, double dfMinY,
                                 double dfMaxY, double dfMinZ, double dfMaxZ)
 
@@ -722,7 +703,8 @@ CPLErr GSBGDataset::WriteHeader(VSILFILE *fp, GInt16 nXSize, GInt16 nYSize,
         return CE_Failure;
     }
 
-    GInt16 nTemp = CPL_LSBWORD16(nXSize);
+    assert(nXSize >= 0 && nXSize <= std::numeric_limits<int16_t>::max());
+    GInt16 nTemp = CPL_LSBWORD16(static_cast<int16_t>(nXSize));
     if (VSIFWriteL((void *)&nTemp, 2, 1, fp) != 1)
     {
         CPLError(CE_Failure, CPLE_FileIO,
@@ -730,7 +712,8 @@ CPLErr GSBGDataset::WriteHeader(VSILFILE *fp, GInt16 nXSize, GInt16 nYSize,
         return CE_Failure;
     }
 
-    nTemp = CPL_LSBWORD16(nYSize);
+    assert(nYSize >= 0 && nYSize <= std::numeric_limits<int16_t>::max());
+    nTemp = CPL_LSBWORD16(static_cast<int16_t>(nYSize));
     if (VSIFWriteL((void *)&nTemp, 2, 1, fp) != 1)
     {
         CPLError(CE_Failure, CPLE_FileIO,
@@ -796,6 +779,32 @@ CPLErr GSBGDataset::WriteHeader(VSILFILE *fp, GInt16 nXSize, GInt16 nYSize,
 }
 
 /************************************************************************/
+/*                        GSBGCreateCheckDims()                         */
+/************************************************************************/
+
+static bool GSBGCreateCheckDims(int nXSize, int nYSize)
+{
+    if (nXSize <= 1 || nYSize <= 1)
+    {
+        CPLError(CE_Failure, CPLE_IllegalArg,
+                 "Unable to create grid, both X and Y size must be "
+                 "larger or equal to 2.");
+        return false;
+    }
+    if (nXSize > std::numeric_limits<short>::max() ||
+        nYSize > std::numeric_limits<short>::max())
+    {
+        CPLError(CE_Failure, CPLE_IllegalArg,
+                 "Unable to create grid, Golden Software Binary Grid format "
+                 "only supports sizes up to %dx%d.  %dx%d not supported.",
+                 std::numeric_limits<short>::max(),
+                 std::numeric_limits<short>::max(), nXSize, nYSize);
+        return false;
+    }
+    return true;
+}
+
+/************************************************************************/
 /*                               Create()                               */
 /************************************************************************/
 
@@ -804,23 +813,8 @@ GDALDataset *GSBGDataset::Create(const char *pszFilename, int nXSize,
                                  GDALDataType eType,
                                  CPL_UNUSED char **papszParamList)
 {
-    if (nXSize <= 0 || nYSize <= 0)
+    if (!GSBGCreateCheckDims(nXSize, nYSize))
     {
-        CPLError(CE_Failure, CPLE_IllegalArg,
-                 "Unable to create grid, both X and Y size must be "
-                 "non-negative.\n");
-
-        return nullptr;
-    }
-    else if (nXSize > std::numeric_limits<short>::max() ||
-             nYSize > std::numeric_limits<short>::max())
-    {
-        CPLError(CE_Failure, CPLE_IllegalArg,
-                 "Unable to create grid, Golden Software Binary Grid format "
-                 "only supports sizes up to %dx%d.  %dx%d not supported.\n",
-                 std::numeric_limits<short>::max(),
-                 std::numeric_limits<short>::max(), nXSize, nYSize);
-
         return nullptr;
     }
 
@@ -845,8 +839,8 @@ GDALDataset *GSBGDataset::Create(const char *pszFilename, int nXSize,
         return nullptr;
     }
 
-    CPLErr eErr = WriteHeader(fp, (GInt16)nXSize, (GInt16)nYSize, 0.0, nXSize,
-                              0.0, nYSize, 0.0, 0.0);
+    CPLErr eErr =
+        WriteHeader(fp, nXSize, nYSize, 0.0, nXSize, 0.0, nYSize, 0.0, 0.0);
     if (eErr != CE_None)
     {
         VSIFCloseL(fp);
@@ -911,16 +905,8 @@ GDALDataset *GSBGDataset::CreateCopy(const char *pszFilename,
     }
 
     GDALRasterBand *poSrcBand = poSrcDS->GetRasterBand(1);
-    if (poSrcBand->GetXSize() > std::numeric_limits<short>::max() ||
-        poSrcBand->GetYSize() > std::numeric_limits<short>::max())
+    if (!GSBGCreateCheckDims(poSrcBand->GetXSize(), poSrcBand->GetYSize()))
     {
-        CPLError(CE_Failure, CPLE_IllegalArg,
-                 "Unable to create grid, Golden Software Binary Grid format "
-                 "only supports sizes up to %dx%d.  %dx%d not supported.\n",
-                 std::numeric_limits<short>::max(),
-                 std::numeric_limits<short>::max(), poSrcBand->GetXSize(),
-                 poSrcBand->GetYSize());
-
         return nullptr;
     }
 
@@ -939,16 +925,15 @@ GDALDataset *GSBGDataset::CreateCopy(const char *pszFilename,
         return nullptr;
     }
 
-    GInt16 nXSize = (GInt16)poSrcBand->GetXSize();
-    GInt16 nYSize = (GInt16)poSrcBand->GetYSize();
-    double adfGeoTransform[6];
+    const int nXSize = poSrcBand->GetXSize();
+    const int nYSize = poSrcBand->GetYSize();
+    GDALGeoTransform gt;
+    poSrcDS->GetGeoTransform(gt);
 
-    poSrcDS->GetGeoTransform(adfGeoTransform);
-
-    double dfMinX = adfGeoTransform[0] + adfGeoTransform[1] / 2;
-    double dfMaxX = adfGeoTransform[1] * (nXSize - 0.5) + adfGeoTransform[0];
-    double dfMinY = adfGeoTransform[5] * (nYSize - 0.5) + adfGeoTransform[3];
-    double dfMaxY = adfGeoTransform[3] + adfGeoTransform[5] / 2;
+    double dfMinX = gt[0] + gt[1] / 2;
+    double dfMaxX = gt[1] * (nXSize - 0.5) + gt[0];
+    double dfMinY = gt[5] * (nYSize - 0.5) + gt[3];
+    double dfMaxY = gt[3] + gt[5] / 2;
     CPLErr eErr = WriteHeader(fp, nXSize, nYSize, dfMinX, dfMaxX, dfMinY,
                               dfMaxY, 0.0, 0.0);
 
@@ -972,7 +957,7 @@ GDALDataset *GSBGDataset::CreateCopy(const char *pszFilename,
     float fSrcNoDataValue = (float)poSrcBand->GetNoDataValue(&bSrcHasNDValue);
     double dfMinZ = std::numeric_limits<double>::max();
     double dfMaxZ = std::numeric_limits<double>::lowest();
-    for (GInt16 iRow = nYSize - 1; iRow >= 0; iRow--)
+    for (int iRow = nYSize - 1; iRow >= 0; iRow--)
     {
         eErr = poSrcBand->RasterIO(GF_Read, 0, iRow, nXSize, 1, pfData, nXSize,
                                    1, GDT_Float32, 0, 0, nullptr);

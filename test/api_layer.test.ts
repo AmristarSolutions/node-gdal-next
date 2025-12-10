@@ -1,14 +1,13 @@
 import * as gdal from 'gdal-async'
 import { assert } from 'chai'
 import * as fileUtils from './utils/file'
+import * as semver from 'semver'
 
 describe('gdal.Layer', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('instance', () => {
     type prepareCb = (ds: gdal.Dataset, l: gdal.Layer) => void
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const prepare_dataset_layer_test = function (mode: string, _arg2: Record<string, unknown> | prepareCb, _arg3?: prepareCb) {
       let ds: gdal.Dataset, layer: gdal.Layer, options, callback: prepareCb,
         err, file: string, dir: string | null, driver: gdal.Driver
@@ -51,21 +50,21 @@ describe('gdal.Layer', () => {
       if (options.autoclose !== false) {
         try {
           ds.close()
-        } catch (e) {
+        } catch (_e) {
           /* ignore */
         }
         if (file && mode === 'w') {
           try {
             driver = gdal.drivers.get('ESRI Shapefile')
             driver.deleteDataset(file)
-          } catch (e) {
+          } catch (_e) {
             /* ignore */
           }
         }
         if (dir) {
           try {
             fileUtils.deleteRecursiveVSIMEM(dir)
-          } catch (e) {
+          } catch (_e) {
             /* ignore */
           }
         }
@@ -95,8 +94,8 @@ describe('gdal.Layer', () => {
         it('should throw error', () => {
           prepare_dataset_layer_test('r', (dataset, layer) => {
             assert.throws(() => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (layer as any).ds = null
+              // @ts-expect-error voluntary error
+              layer.ds = null
             }, /ds is a read-only property/)
           })
         })
@@ -114,7 +113,9 @@ describe('gdal.Layer', () => {
               'GEOGCS["GCS_North_American_1983",DATUM["North_American_Datum_1983",SPHEROID["GRS_1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["Degree",0.017453292519943295],AUTHORITY["EPSG","4269"]]',
               'GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4269"]]'
             ]
-            assert.include(expectedWKT, layer.srs.toWKT())
+            const srs = layer.srs
+            assert.isNotNull(srs)
+            assert.include(expectedWKT, srs.toWKT())
           })
         })
         it('should return the same SpatialReference object', () => {
@@ -142,10 +143,11 @@ describe('gdal.Layer', () => {
           it('should not be destroyed when dataset is destroyed', () => {
             prepare_dataset_layer_test('r', (dataset, layer) => {
               const srs = layer.srs
+              assert.instanceOf(srs, gdal.SpatialReference)
               dataset.close()
-              assert.doesNotThrow(() => {
-                assert.ok(srs.toWKT())
-              })
+              assert.isNotNull(srs)
+              assert.instanceOf(srs, gdal.SpatialReference)
+              assert.ok(srs.toWKT())
             })
           })
         })
@@ -154,8 +156,8 @@ describe('gdal.Layer', () => {
         it('should throw error', () => {
           prepare_dataset_layer_test('r', (dataset, layer) => {
             assert.throws(() => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (layer as any).srs = 'ESPG:4326'
+              // @ts-expect-error voluntary error
+              layer.srs = 'ESPG:4326'
             }, /srs is a read-only property/)
           })
         })
@@ -182,8 +184,8 @@ describe('gdal.Layer', () => {
         it('should throw error', () => {
           prepare_dataset_layer_test('r', (dataset, layer) => {
             assert.throws(() => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (layer as any).name = null
+              // @ts-expect-error voluntary error
+              layer.name = null
             }, /name is a read-only property/)
           })
         })
@@ -210,8 +212,8 @@ describe('gdal.Layer', () => {
         it('should throw error', () => {
           prepare_dataset_layer_test('r', (dataset, layer) => {
             assert.throws(() => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (layer as any).geomType = null
+              // @ts-expect-error voluntary error
+              layer.geomType = null
             }, /geomType is a read-only property/)
           })
         })
@@ -280,11 +282,14 @@ describe('gdal.Layer', () => {
         })
       })
       it("should throw error if force flag is false and layer doesn't have extent already computed", () => {
-        const dataset = gdal.open(`${__dirname}/data/park.geo.json`)
-        const layer = dataset.layers.get(0)
-        assert.throws(() => {
-          layer.getExtent(false)
-        }, "Can't get layer extent without computing it")
+        // No longer true in GDAL 3.9
+        if (semver.lt(gdal.version, '3.9.0')) {
+          const dataset = gdal.open(`${__dirname}/data/park.geo.json`)
+          const layer = dataset.layers.get(0)
+          assert.throws(() => {
+            layer.getExtent(false)
+          }, "Can't get layer extent without computing it")
+        }
       })
       it('should throw error if dataset is destroyed', () => {
         prepare_dataset_layer_test('r', (dataset, layer) => {
@@ -421,8 +426,8 @@ describe('gdal.Layer', () => {
         it('should throw error', () => {
           prepare_dataset_layer_test('r', (dataset, layer) => {
             assert.throws(() => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (layer as any).features = null
+              // @ts-expect-error voluntary error
+              layer.features = null
             }, /features is a read-only property/)
           })
         })
@@ -547,7 +552,7 @@ describe('gdal.Layer', () => {
           prepare_dataset_layer_test('r', (dataset, layer) => {
             dataset.close()
             assert.throws(() => {
-              for (const l of layer.features) l
+              for (const l of layer.features) void l
             }, /already destroyed/)
           })
         })
@@ -707,8 +712,8 @@ describe('gdal.Layer', () => {
         it('should throw error', () => {
           prepare_dataset_layer_test('w', (dataset, layer) => {
             assert.throws(() => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (layer as any).fields = null
+              // @ts-expect-error voluntary error
+              layer.fields = null
             }, /fields is a read-only property/)
           })
         })

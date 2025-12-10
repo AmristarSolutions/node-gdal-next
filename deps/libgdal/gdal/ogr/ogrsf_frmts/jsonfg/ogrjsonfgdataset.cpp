@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2023, Even Rouault <even.rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_jsonfg.h"
@@ -33,36 +17,204 @@
 #include "cpl_vsi_error.h"
 #include "cpl_vsi_virtual.h"
 
+#include <cmath>
+
+constexpr const char *CONFORMANCE_CORE =
+    "http://www.opengis.net/spec/json-fg-1/0.3/conf/core";
+constexpr const char *CONFORMANCE_FEATURE_TYPE =
+    "http://www.opengis.net/spec/json-fg-1/0.3/conf/types-schemas";
+constexpr const char *CONFORMANCE_POLYHEDRA =
+    "http://www.opengis.net/spec/json-fg-1/0.3/conf/polyhedra";
+constexpr const char *CONFORMANCE_CIRCULAR_ARCS =
+    "http://www.opengis.net/spec/json-fg-1/0.3/conf/circular-arcs";
+constexpr const char *CONFORMANCE_MEASURES =
+    "http://www.opengis.net/spec/json-fg-1/0.3/conf/measures";
+
 /************************************************************************/
 /*                  OGRJSONFGDataset::~OGRJSONFGDataset()               */
 /************************************************************************/
 
 OGRJSONFGDataset::~OGRJSONFGDataset()
 {
+    OGRJSONFGDataset::Close();
     CPLFree(pszGeoData_);
-    if (fpOut_)
-    {
-        FinishWriting();
+}
 
-        VSIFCloseL(fpOut_);
+/************************************************************************/
+/*                        OGRJSONFGDataset::Close()                     */
+/************************************************************************/
+
+CPLErr OGRJSONFGDataset::Close()
+{
+    CPLErr eErr = CE_None;
+    if (nOpenFlags != OPEN_FLAGS_CLOSED)
+    {
+        if (fpOut_)
+        {
+            eErr = GDAL::Combine(eErr, FinishWriting());
+
+            eErr = GDAL::Combine(eErr, VSIFCloseL(fpOut_) == 0);
+            fpOut_ = nullptr;
+        }
+
+        apoLayers_.clear();
+
+        eErr = GDAL::Combine(eErr, GDALDataset::Close());
     }
+
+    return eErr;
 }
 
 /************************************************************************/
 /*                           FinishWriting()                            */
 /************************************************************************/
 
-void OGRJSONFGDataset::FinishWriting()
+bool OGRJSONFGDataset::FinishWriting()
 {
+    bool ret = true;
     if (m_nPositionBeforeFCClosed == 0)
     {
         m_nPositionBeforeFCClosed = fpOut_->Tell();
 
         if (!EmitStartFeaturesIfNeededAndReturnIfFirstFeature())
-            VSIFPrintfL(fpOut_, "\n");
-        VSIFPrintfL(fpOut_, "]\n}\n");
-        fpOut_->Flush();
+            ret &= VSIFPrintfL(fpOut_, "\n") != 0;
+        ret &= VSIFPrintfL(fpOut_, "]") != 0;
+
+        // When we didn't know if there was a single layer, we omitted writing
+        // the coordinate precision at ICreateLayer() time.
+        // Now we can check if there was a single layer, or several layers with
+        // same precision setting, and write it when possible.
+        if (!bSingleOutputLayer_ && !apoLayers_.empty() &&
+            apoLayers_.front()->GetLayerDefn()->GetGeomFieldCount() > 0)
+        {
+            const auto &oCoordPrec = apoLayers_.front()
+                                         ->GetLayerDefn()
+                                         ->GetGeomFieldDefn(0)
+                                         ->GetCoordinatePrecision();
+            bool bSameGeomCoordPrec =
+                (oCoordPrec.dfXYResolution !=
+                     OGRGeomCoordinatePrecision::UNKNOWN ||
+                 oCoordPrec.dfZResolution !=
+                     OGRGeomCoordinatePrecision::UNKNOWN);
+            for (size_t i = 1; i < apoLayers_.size(); ++i)
+            {
+                if (apoLayers_[i]->GetLayerDefn()->GetGeomFieldCount() > 0)
+                {
+                    const auto &oOtherCoordPrec =
+                        apoLayers_[i]
+                            ->GetLayerDefn()
+                            ->GetGeomFieldDefn(0)
+                            ->GetCoordinatePrecision();
+                    bSameGeomCoordPrec &= (oOtherCoordPrec.dfXYResolution ==
+                                               oCoordPrec.dfXYResolution &&
+                                           oOtherCoordPrec.dfZResolution ==
+                                               oCoordPrec.dfZResolution);
+                }
+            }
+            if (bSameGeomCoordPrec)
+            {
+                if (oCoordPrec.dfXYResolution !=
+                    OGRGeomCoordinatePrecision::UNKNOWN)
+                {
+                    ret &=
+                        VSIFPrintfL(fpOut_,
+                                    ",\n\"xy_coordinate_resolution_place\":%g",
+                                    oCoordPrec.dfXYResolution) != 0;
+                }
+                if (oCoordPrec.dfZResolution !=
+                    OGRGeomCoordinatePrecision::UNKNOWN)
+                {
+                    ret &=
+                        VSIFPrintfL(fpOut_,
+                                    ",\n\"z_coordinate_resolution_place\":%g",
+                                    oCoordPrec.dfZResolution) != 0;
+                }
+
+                OGRSpatialReference oSRSWGS84;
+                oSRSWGS84.SetWellKnownGeogCS("WGS84");
+                const auto oCoordPrecWGS84 = oCoordPrec.ConvertToOtherSRS(
+                    apoLayers_.front()->GetSpatialRef(), &oSRSWGS84);
+
+                if (oCoordPrecWGS84.dfXYResolution !=
+                    OGRGeomCoordinatePrecision::UNKNOWN)
+                {
+                    ret &= VSIFPrintfL(fpOut_,
+                                       ",\n\"xy_coordinate_resolution\":%g",
+                                       oCoordPrecWGS84.dfXYResolution) != 0;
+                }
+                if (oCoordPrecWGS84.dfZResolution !=
+                    OGRGeomCoordinatePrecision::UNKNOWN)
+                {
+                    ret &=
+                        VSIFPrintfL(fpOut_, ",\n\"z_coordinate_resolution\":%g",
+                                    oCoordPrecWGS84.dfZResolution) != 0;
+                }
+            }
+        }
+
+        bool bPolyhedra = false;
+        bool bCurve = false;
+        bool bMeasure = false;
+        for (auto &poLayer : apoLayers_)
+        {
+            auto poWriteLayer =
+                dynamic_cast<OGRJSONFGWriteLayer *>(poLayer.get());
+            if (poWriteLayer)
+            {
+                bPolyhedra |= poWriteLayer->HasPolyhedra();
+                bCurve |= poWriteLayer->HasCurve();
+                bMeasure |= poWriteLayer->HasMeasure();
+            }
+        }
+        if (bPolyhedra || bCurve || bMeasure ||
+            m_nPositionBeforeConformsTo == 0)
+        {
+            if (m_nPositionBeforeConformsTo > 0)
+            {
+                ret &= VSIFSeekL(fpOut_, m_nPositionBeforeConformsTo,
+                                 SEEK_SET) == 0;
+            }
+            else
+            {
+                ret &= VSIFPrintfL(fpOut_, ",\n") != 0;
+            }
+            ret &= VSIFPrintfL(fpOut_,
+                               "\"conformsTo\": [\n"
+                               "  \"%s\",\n  \"%s\"",
+                               CONFORMANCE_CORE, CONFORMANCE_FEATURE_TYPE) != 0;
+            if (bPolyhedra)
+                ret &= VSIFPrintfL(fpOut_, ",\n  \"%s\"",
+                                   CONFORMANCE_POLYHEDRA) != 0;
+            if (bCurve)
+                ret &= VSIFPrintfL(fpOut_, ",\n  \"%s\"",
+                                   CONFORMANCE_CIRCULAR_ARCS) != 0;
+            if (bMeasure)
+                ret &= VSIFPrintfL(fpOut_, ",\n  \"%s\"",
+                                   CONFORMANCE_MEASURES) != 0;
+            if (m_nPositionBeforeConformsTo > 0)
+            {
+                ret &= VSIFPrintfL(fpOut_, "\n],") != 0;
+                ret &= VSIFPrintfL(
+                           fpOut_, "%s\n",
+                           std::string(static_cast<size_t>(
+                                           m_nPositionAfterConformsTo -
+                                           strlen(",") - VSIFTellL(fpOut_)),
+                                       ' ')
+                               .c_str()) != 0;
+
+                ret &= VSIFSeekL(fpOut_, 0, SEEK_END) == 0;
+            }
+            else
+            {
+                ret &= VSIFPrintfL(fpOut_, "\n]") != 0;
+            }
+        }
+
+        ret &= VSIFPrintfL(fpOut_, "\n}\n") != 0;
+
+        ret &= fpOut_->Flush() == 0;
     }
+    return ret;
 }
 
 /************************************************************************/
@@ -143,7 +295,7 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
             return false;
         }
         SetDescription(pszUnprefixed);
-        osDefaultLayerName = CPLGetBasename(pszUnprefixed);
+        osDefaultLayerName = CPLGetBasenameSafe(pszUnprefixed);
         eAccess = poOpenInfo->eAccess;
 
         // Ingests the first bytes of the file in pszGeoData_
@@ -188,7 +340,7 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
 
     if (nSrcType == eGeoJSONSourceFile)
     {
-        auto poReader = cpl::make_unique<OGRJSONFGReader>();
+        auto poReader = std::make_unique<OGRJSONFGReader>();
         SetReaderOptions(*(poReader.get()));
 
         // Try to use a streaming parser if the content of the file seems
@@ -198,12 +350,12 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
         if (pszStr)
         {
             pszStr += strlen("\"features\"");
-            while (*pszStr && isspace(*pszStr))
+            while (*pszStr && isspace(static_cast<unsigned char>(*pszStr)))
                 pszStr++;
             if (*pszStr == ':')
             {
                 pszStr++;
-                while (*pszStr && isspace(*pszStr))
+                while (*pszStr && isspace(static_cast<unsigned char>(*pszStr)))
                     pszStr++;
                 if (*pszStr == '[')
                 {
@@ -214,17 +366,18 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
         if (bUseStreamingInterface)
         {
             bool bCanTryWithNonStreamingParserOut = true;
+            bool bHasTopLevelMeasures = false;
             if (poReader->AnalyzeWithStreamingParser(
                     this, fp.get(), osDefaultLayerName,
-                    bCanTryWithNonStreamingParserOut))
+                    bCanTryWithNonStreamingParserOut, bHasTopLevelMeasures))
             {
                 if (!apoLayers_.empty())
                 {
                     auto poLayer = cpl::down_cast<OGRJSONFGStreamedLayer *>(
                         apoLayers_[0].get());
                     poLayer->SetFile(std::move(fp));
-                    auto poParser = cpl::make_unique<OGRJSONFGStreamingParser>(
-                        *(poReader.get()), false);
+                    auto poParser = std::make_unique<OGRJSONFGStreamingParser>(
+                        *(poReader.get()), false, bHasTopLevelMeasures);
                     poLayer->SetStreamingParser(std::move(poParser));
                 }
 
@@ -243,8 +396,8 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
                     }
                     poLayer->SetFile(std::move(fpNew));
 
-                    auto poParser = cpl::make_unique<OGRJSONFGStreamingParser>(
-                        *(poReader.get()), false);
+                    auto poParser = std::make_unique<OGRJSONFGStreamingParser>(
+                        *(poReader.get()), false, bHasTopLevelMeasures);
                     poLayer->SetStreamingParser(std::move(poParser));
                 }
                 poReader_ = std::move(poReader);
@@ -252,13 +405,13 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
             }
             if (!bCanTryWithNonStreamingParserOut)
                 return false;
-
-            // Fallback to in-memory ingestion
-            CPLAssert(poOpenInfo->fpL == nullptr);
-            poOpenInfo->fpL = fp.release();
-            if (!ReadFromFile(poOpenInfo, pszUnprefixed))
-                return false;
         }
+
+        // Fallback to in-memory ingestion
+        CPLAssert(poOpenInfo->fpL == nullptr);
+        poOpenInfo->fpL = fp.release();
+        if (!ReadFromFile(poOpenInfo, pszUnprefixed))
+            return false;
     }
 
     // In-memory ingestion of the file
@@ -274,7 +427,7 @@ bool OGRJSONFGDataset::Open(GDALOpenInfo *poOpenInfo,
 /*                  OGRJSONFGDataset::GetLayer()                        */
 /************************************************************************/
 
-OGRLayer *OGRJSONFGDataset::GetLayer(int i)
+const OGRLayer *OGRJSONFGDataset::GetLayer(int i) const
 {
     if (i < 0 || i >= static_cast<int>(apoLayers_.size()))
         return nullptr;
@@ -363,7 +516,7 @@ bool OGRJSONFGDataset::ReadFromService(GDALOpenInfo *poOpenInfo,
     char *pszStoredContent = OGRGeoJSONDriverStealStoredContent(pszSource);
     if (pszStoredContent != nullptr)
     {
-        if (JSONFGIsObject(pszStoredContent))
+        if (JSONFGIsObject(pszStoredContent, poOpenInfo))
         {
             pszGeoData_ = pszStoredContent;
             nGeoDataLen_ = strlen(pszGeoData_);
@@ -429,7 +582,7 @@ bool OGRJSONFGDataset::ReadFromService(GDALOpenInfo *poOpenInfo,
     /* -------------------------------------------------------------------- */
     if (EQUAL(pszSource, poOpenInfo->pszFilename))
     {
-        if (!JSONFGIsObject(pszGeoData_))
+        if (!JSONFGIsObject(pszGeoData_, poOpenInfo))
         {
             OGRGeoJSONDriverStoreContent(pszSource, pszGeoData_);
             pszGeoData_ = nullptr;
@@ -484,7 +637,26 @@ bool OGRJSONFGDataset::Create(const char *pszName, CSLConstList papszOptions)
     SetDescription(pszName);
 
     VSIFPrintfL(fpOut_, "{\n\"type\": \"FeatureCollection\",\n");
-    VSIFPrintfL(fpOut_, "\"conformsTo\" : [\"[ogc-json-fg-1-0.1:core]\"],\n");
+    if (bFpOutputIsSeekable_)
+    {
+        m_nPositionBeforeConformsTo = VSIFTellL(fpOut_);
+        VSIFPrintfL(fpOut_,
+                    "\"conformsTo\": [\n"
+                    "  \"%s\",\n"
+                    "  \"%s\"\n"
+                    "],\n",
+                    CONFORMANCE_CORE, CONFORMANCE_FEATURE_TYPE);
+        VSIFPrintfL(
+            fpOut_, "%s",
+            std::string(
+                strlen(",") + strlen("  \"\",\n") +
+                    strlen(CONFORMANCE_POLYHEDRA) + strlen("  \"\",\n") +
+                    strlen(CONFORMANCE_CIRCULAR_ARCS) + strlen("  \"\",\n") +
+                    strlen(CONFORMANCE_MEASURES) + strlen("\",\n"),
+                ' ')
+                .c_str());
+        m_nPositionAfterConformsTo = VSIFTellL(fpOut_);
+    }
 
     return true;
 }
@@ -508,10 +680,10 @@ bool OGRJSONFGDataset::EmitStartFeaturesIfNeededAndReturnIfFirstFeature()
 /*                           ICreateLayer()                             */
 /************************************************************************/
 
-OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
-                                         const OGRSpatialReference *poSRS,
-                                         OGRwkbGeometryType eGType,
-                                         char **papszOptions)
+OGRLayer *
+OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
+                               const OGRGeomFieldDefn *poSrcGeomFieldDefn,
+                               CSLConstList papszOptions)
 {
     if (nullptr == fpOut_)
     {
@@ -529,27 +701,37 @@ OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
         return nullptr;
     }
 
+    const auto eGType =
+        poSrcGeomFieldDefn ? poSrcGeomFieldDefn->GetType() : wkbNone;
+    const OGRSpatialReference *poSRS =
+        poSrcGeomFieldDefn ? poSrcGeomFieldDefn->GetSpatialRef() : nullptr;
+
     std::string osCoordRefSys;
     std::unique_ptr<OGRCoordinateTransformation> poCTToWGS84;
+    std::unique_ptr<OGRSpatialReference> poSRSTmp;  // keep in this scope
     if (poSRS)
     {
-        const auto GetCURIE =
-            [](const char *pszAuthName, const char *pszAuthCode)
+        const auto GetURI = [](const char *pszAuthName, const char *pszAuthCode)
         {
-            std::string osRet = "[";
+            std::string osRet = "http://www.opengis.net/def/crs/";
             if (STARTS_WITH(pszAuthName, "IAU_"))
-                osRet += "IAU";
+            {
+                osRet += "IAU/";
+                osRet += pszAuthName + strlen("IAU_");
+                osRet += '/';
+            }
             else
+            {
                 osRet += pszAuthName;
-            osRet += ':';
+                osRet += "/0/";
+            }
             osRet += pszAuthCode;
-            osRet += ']';
             return osRet;
         };
 
-        const auto GetCoordRefSys = [GetCURIE](const char *pszAuthName,
-                                               const char *pszAuthCode,
-                                               double dfCoordEpoch = 0)
+        const auto GetCoordRefSys = [GetURI](const char *pszAuthName,
+                                             const char *pszAuthCode,
+                                             double dfCoordEpoch = 0)
         {
             if (dfCoordEpoch > 0)
             {
@@ -559,7 +741,7 @@ OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
                 json_object_object_add(
                     poObj, "href",
                     json_object_new_string(
-                        GetCURIE(pszAuthName, pszAuthCode).c_str()));
+                        GetURI(pszAuthName, pszAuthCode).c_str()));
                 json_object_object_add(poObj, "epoch",
                                        json_object_new_double(dfCoordEpoch));
                 return poObj;
@@ -567,13 +749,27 @@ OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
             else
             {
                 return json_object_new_string(
-                    GetCURIE(pszAuthName, pszAuthCode).c_str());
+                    GetURI(pszAuthName, pszAuthCode).c_str());
             }
         };
 
-        const char *pszAuthName = poSRS->GetAuthorityName(nullptr);
-        const char *pszAuthCode = poSRS->GetAuthorityCode(nullptr);
         const double dfCoordEpoch = poSRS->GetCoordinateEpoch();
+        const char *pszAuthName = poSRS->GetAuthorityName(nullptr);
+        if (!pszAuthName)
+        {
+            auto poBestMatch = poSRS->FindBestMatch();
+            if (poBestMatch)
+            {
+                poSRSTmp.reset(poBestMatch);
+                if (dfCoordEpoch > 0)
+                    poSRSTmp->SetCoordinateEpoch(dfCoordEpoch);
+                poSRSTmp->SetDataAxisToSRSAxisMapping(
+                    poSRS->GetDataAxisToSRSAxisMapping());
+                poSRS = poSRSTmp.get();
+                pszAuthName = poSRS->GetAuthorityName(nullptr);
+            }
+        }
+        const char *pszAuthCode = poSRS->GetAuthorityCode(nullptr);
         json_object *poObj = nullptr;
         if (pszAuthName && pszAuthCode)
         {
@@ -596,11 +792,37 @@ OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
                     poObj, GetCoordRefSys(pszAuthNameVert, pszAuthCodeVert));
             }
         }
+        else
+        {
+            char *pszPROJJSON = nullptr;
+            if (poSRS->exportToPROJJSON(&pszPROJJSON, nullptr) == OGRERR_NONE)
+            {
+                CPLJSONDocument oDoc;
+                if (oDoc.LoadMemory(pszPROJJSON))
+                {
+                    poObj = json_object_new_object();
+                    json_object_object_add(poObj, "type",
+                                           json_object_new_string("PROJJSON"));
+                    auto poPROJJSON = reinterpret_cast<json_object *>(
+                        oDoc.GetRoot().GetInternalHandle());
+                    json_object_get(poPROJJSON);
+                    json_object_object_add(poObj, "value", poPROJJSON);
+                    if (dfCoordEpoch > 0)
+                    {
+                        json_object_object_add(
+                            poObj, "epoch",
+                            json_object_new_double(dfCoordEpoch));
+                    }
+                }
+            }
+            CPLFree(pszPROJJSON);
+        }
 
         if (poObj)
         {
-            osCoordRefSys =
-                json_object_to_json_string_ext(poObj, JSON_C_TO_STRING_SPACED);
+            osCoordRefSys = CPLString(json_object_to_json_string_ext(
+                                          poObj, JSON_C_TO_STRING_SPACED))
+                                .replaceAll("\\/", '/');
             json_object_put(poObj);
         }
         else
@@ -613,7 +835,8 @@ OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
             return nullptr;
         }
 
-        if (!strstr(osCoordRefSys.c_str(), "[IAU:"))
+        if (!strstr(osCoordRefSys.c_str(),
+                    "http://www.opengis.net/def/crs/IAU/"))
         {
             OGRSpatialReference oSRSWGS84;
             oSRSWGS84.SetWellKnownGeogCS("WGS84");
@@ -625,32 +848,190 @@ OGRLayer *OGRJSONFGDataset::ICreateLayer(const char *pszNameIn,
     else if (eGType != wkbNone)
     {
         if (OGR_GT_HasZ(eGType))
-            osCoordRefSys = "[OGC:CRS84h]";
+            osCoordRefSys = "http://www.opengis.net/def/crs/OGC/0/CRS84h";
         else
-            osCoordRefSys = "[OGC:CRS84]";
+            osCoordRefSys = "http://www.opengis.net/def/crs/OGC/0/CRS84";
         CPLError(CE_Warning, CPLE_AppDefined,
                  "No SRS set on layer. Assuming it is long/lat on WGS84 "
                  "ellipsoid");
     }
 
-    auto poLayer = cpl::make_unique<OGRJSONFGWriteLayer>(
+    CPLStringList aosOptions(papszOptions);
+
+    if (const char *pszCoordPrecisionGeom =
+            CSLFetchNameValue(papszOptions, "COORDINATE_PRECISION_GEOMETRY"))
+    {
+        double dfXYResolutionGeometry =
+            std::pow(10.0, -CPLAtof(pszCoordPrecisionGeom));
+        double dfZResolutionGeometry = dfXYResolutionGeometry;
+        aosOptions.SetNameValue("XY_COORD_PRECISION_GEOMETRY",
+                                pszCoordPrecisionGeom);
+        aosOptions.SetNameValue("Z_COORD_PRECISION_GEOMETRY",
+                                pszCoordPrecisionGeom);
+        if (IsSingleOutputLayer())
+        {
+            VSIFPrintfL(fpOut_, "\"xy_coordinate_resolution\": %g,\n",
+                        dfXYResolutionGeometry);
+            if (poSRS && poSRS->GetAxesCount() == 3)
+            {
+                VSIFPrintfL(fpOut_, "\"z_coordinate_resolution\": %g,\n",
+                            dfZResolutionGeometry);
+            }
+        }
+    }
+    else if (poSrcGeomFieldDefn &&
+             poSrcGeomFieldDefn->GetCoordinatePrecision().dfXYResolution ==
+                 OGRGeomCoordinatePrecision::UNKNOWN &&
+             CSLFetchNameValue(papszOptions, "SIGNIFICANT_FIGURES") == nullptr)
+    {
+        const int nXYPrecisionGeometry = 7;
+        const int nZPrecisionGeometry = 3;
+        aosOptions.SetNameValue("XY_COORD_PRECISION_GEOMETRY",
+                                CPLSPrintf("%d", nXYPrecisionGeometry));
+        aosOptions.SetNameValue("Z_COORD_PRECISION_GEOMETRY",
+                                CPLSPrintf("%d", nZPrecisionGeometry));
+    }
+
+    double dfXYResolution = OGRGeomCoordinatePrecision::UNKNOWN;
+    double dfZResolution = OGRGeomCoordinatePrecision::UNKNOWN;
+
+    if (const char *pszCoordPrecisionPlace =
+            CSLFetchNameValue(papszOptions, "COORDINATE_PRECISION_PLACE"))
+    {
+        dfXYResolution = std::pow(10.0, -CPLAtof(pszCoordPrecisionPlace));
+        dfZResolution = dfXYResolution;
+        if (IsSingleOutputLayer())
+        {
+            VSIFPrintfL(fpOut_, "\"xy_coordinate_resolution_place\": %g,\n",
+                        dfXYResolution);
+            if (poSRS && poSRS->GetAxesCount() == 3)
+            {
+                VSIFPrintfL(fpOut_, "\"z_coordinate_resolution_place\": %g,\n",
+                            dfZResolution);
+            }
+        }
+    }
+    else if (poSrcGeomFieldDefn &&
+             CSLFetchNameValue(papszOptions, "COORDINATE_PRECISION_PLACE") ==
+                 nullptr &&
+             CSLFetchNameValue(papszOptions, "SIGNIFICANT_FIGURES") == nullptr)
+    {
+        const auto &oCoordPrec = poSrcGeomFieldDefn->GetCoordinatePrecision();
+        OGRSpatialReference oSRSWGS84;
+        oSRSWGS84.SetWellKnownGeogCS("WGS84");
+        const auto oCoordPrecWGS84 =
+            oCoordPrec.ConvertToOtherSRS(poSRS, &oSRSWGS84);
+
+        if (oCoordPrec.dfXYResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+        {
+            dfXYResolution = oCoordPrec.dfXYResolution;
+            aosOptions.SetNameValue(
+                "XY_COORD_PRECISION_PLACE",
+                CPLSPrintf("%d",
+                           OGRGeomCoordinatePrecision::ResolutionToPrecision(
+                               oCoordPrec.dfXYResolution)));
+            if (IsSingleOutputLayer())
+            {
+                VSIFPrintfL(fpOut_, "\"xy_coordinate_resolution_place\": %g,\n",
+                            oCoordPrec.dfXYResolution);
+            }
+
+            if (CSLFetchNameValue(papszOptions,
+                                  "COORDINATE_PRECISION_GEOMETRY") == nullptr)
+            {
+                const double dfXYResolutionGeometry =
+                    oCoordPrecWGS84.dfXYResolution;
+
+                aosOptions.SetNameValue(
+                    "XY_COORD_PRECISION_GEOMETRY",
+                    CPLSPrintf(
+                        "%d", OGRGeomCoordinatePrecision::ResolutionToPrecision(
+                                  dfXYResolutionGeometry)));
+                if (IsSingleOutputLayer())
+                {
+                    VSIFPrintfL(fpOut_, "\"xy_coordinate_resolution\": %g,\n",
+                                dfXYResolutionGeometry);
+                }
+            }
+        }
+
+        if (oCoordPrec.dfZResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+        {
+            dfZResolution = oCoordPrec.dfZResolution;
+            aosOptions.SetNameValue(
+                "Z_COORD_PRECISION_PLACE",
+                CPLSPrintf("%d",
+                           OGRGeomCoordinatePrecision::ResolutionToPrecision(
+                               dfZResolution)));
+            if (IsSingleOutputLayer())
+            {
+                VSIFPrintfL(fpOut_, "\"z_coordinate_resolution_place\": %g,\n",
+                            dfZResolution);
+            }
+
+            if (CSLFetchNameValue(papszOptions,
+                                  "COORDINATE_PRECISION_GEOMETRY") == nullptr)
+            {
+                const double dfZResolutionGeometry =
+                    oCoordPrecWGS84.dfZResolution;
+
+                aosOptions.SetNameValue(
+                    "Z_COORD_PRECISION_GEOMETRY",
+                    CPLSPrintf(
+                        "%d", OGRGeomCoordinatePrecision::ResolutionToPrecision(
+                                  dfZResolutionGeometry)));
+                if (IsSingleOutputLayer())
+                {
+                    VSIFPrintfL(fpOut_, "\"z_coordinate_resolution\": %g,\n",
+                                dfZResolutionGeometry);
+                }
+            }
+        }
+    }
+
+    auto poLayer = std::make_unique<OGRJSONFGWriteLayer>(
         pszNameIn, poSRS, std::move(poCTToWGS84), osCoordRefSys, eGType,
-        papszOptions, this);
+        aosOptions.List(), this);
     apoLayers_.emplace_back(std::move(poLayer));
 
-    return apoLayers_.back().get();
+    auto poLayerAdded = apoLayers_.back().get();
+    if (eGType != wkbNone &&
+        dfXYResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+    {
+        auto poGeomFieldDefn =
+            poLayerAdded->GetLayerDefn()->GetGeomFieldDefn(0);
+        OGRGeomCoordinatePrecision oCoordPrec(
+            poGeomFieldDefn->GetCoordinatePrecision());
+        oCoordPrec.dfXYResolution = dfXYResolution;
+        poGeomFieldDefn->SetCoordinatePrecision(oCoordPrec);
+    }
+
+    if (eGType != wkbNone &&
+        dfZResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+    {
+        auto poGeomFieldDefn =
+            poLayerAdded->GetLayerDefn()->GetGeomFieldDefn(0);
+        OGRGeomCoordinatePrecision oCoordPrec(
+            poGeomFieldDefn->GetCoordinatePrecision());
+        oCoordPrec.dfZResolution = dfZResolution;
+        poGeomFieldDefn->SetCoordinatePrecision(oCoordPrec);
+    }
+
+    return poLayerAdded;
 }
 
 /************************************************************************/
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRJSONFGDataset::TestCapability(const char *pszCap)
+int OGRJSONFGDataset::TestCapability(const char *pszCap) const
 {
     if (EQUAL(pszCap, ODsCCreateLayer))
         return fpOut_ != nullptr &&
                (!bSingleOutputLayer_ || apoLayers_.empty());
-    else if (EQUAL(pszCap, ODsCZGeometries))
+    else if (EQUAL(pszCap, ODsCZGeometries) ||
+             EQUAL(pszCap, ODsCMeasuredGeometries) ||
+             EQUAL(pszCap, ODsCCurveGeometries))
         return TRUE;
 
     return FALSE;

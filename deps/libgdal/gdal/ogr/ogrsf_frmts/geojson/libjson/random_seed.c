@@ -223,15 +223,15 @@ static int get_dev_random_seed(int *seed)
 {
 	DEBUG_SEED("get_dev_random_seed");
 
-	struct stat buf;
-	if (stat(dev_random_file, &buf))
-		return -1;
-	if ((buf.st_mode & S_IFCHR) == 0)
-		return -1;
-
 	int fd = open(dev_random_file, O_RDONLY);
 	if (fd < 0)
 	{
+		struct stat buf;
+		if (stat(dev_random_file, &buf))
+			return -1;
+		if ((buf.st_mode & S_IFCHR) == 0)
+			return -1;
+
 		fprintf(stderr, "error opening %s: %s", dev_random_file, strerror(errno));
 		return -1;
 	}
@@ -277,8 +277,9 @@ static int get_cryptgenrandom_seed(int *seed)
 	DEBUG_SEED("get_cryptgenrandom_seed");
 
 	/* WinNT 4 and Win98 do no support CRYPT_SILENT */
-	if (LOBYTE(LOWORD(GetVersion())) > 4)
-		dwFlags |= CRYPT_SILENT;
+	// E.Rouault: commented out to avoid warning C4996: 'GetVersion': was declared deprecated
+	//if (LOBYTE(LOWORD(GetVersion())) > 4)
+	dwFlags |= CRYPT_SILENT;
 
 	if (!CryptAcquireContextA(&hProvider, 0, 0, PROV_RSA_FULL, dwFlags))
 	{
@@ -304,14 +305,15 @@ static int get_cryptgenrandom_seed(int *seed)
 /* get_time_seed */
 
 #ifndef HAVE_ARC4RANDOM
+#include <limits.h>
+#include <stdint.h>
 #include <time.h>
 
 static int get_time_seed(void)
 {
 	DEBUG_SEED("get_time_seed");
 
-	/* coverity[store_truncates_time_t] */
-	return (unsigned)time(NULL) * 433494437;
+	return (int)(((uint64_t)(time(NULL) & UINT_MAX) * 433494437) & INT_MAX);
 }
 #endif
 

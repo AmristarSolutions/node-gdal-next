@@ -411,7 +411,7 @@ NAN_GETTER(Layer::dsGetter) {
  * @name srs
  * @instance
  * @memberof Layer
- * @type {SpatialReference}
+ * @type {SpatialReference|null}
  */
 NAN_GETTER(Layer::srsGetter) {
   Layer *layer = Nan::ObjectWrap::Unwrap<Layer>(info.This());
@@ -421,7 +421,7 @@ NAN_GETTER(Layer::srsGetter) {
   }
   GDAL_LOCK_PARENT(layer);
   auto r = layer->this_->GetSpatialRef();
-  info.GetReturnValue().Set(SpatialReference::New(r, false));
+  info.GetReturnValue().Set(SpatialReference::New(r));
 }
 
 /**

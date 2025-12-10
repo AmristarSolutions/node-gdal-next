@@ -8,23 +8,7 @@
  * Copyright (c) 2002, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2009-2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_gml.h"
@@ -35,6 +19,8 @@
 #include "ogr_p.h"
 #include "ogr_api.h"
 
+#include <limits>
+
 /************************************************************************/
 /*                           OGRGMLLayer()                              */
 /************************************************************************/
@@ -43,8 +29,7 @@ OGRGMLLayer::OGRGMLLayer(const char *pszName, bool bWriterIn,
                          OGRGMLDataSource *poDSIn)
     : poFeatureDefn(new OGRFeatureDefn(
           pszName + (STARTS_WITH_CI(pszName, "ogr:") ? 4 : 0))),
-      iNextGMLId(0), bInvalidFIDFound(false), pszFIDPrefix(nullptr),
-      bWriter(bWriterIn), bSameSRS(false), poDS(poDSIn),
+      bWriter(bWriterIn), poDS(poDSIn),
       poFClass(!bWriter ? poDS->GetReader()->GetClass(pszName) : nullptr),
       // Reader's should get the corresponding GMLFeatureClass and cache it.
       hCacheSRS(GML_BuildOGRGeometryFromList_CreateCache()),
@@ -69,7 +54,7 @@ OGRGMLLayer::OGRGMLLayer(const char *pszName, bool bWriterIn,
 OGRGMLLayer::~OGRGMLLayer()
 
 {
-    CPLFree(pszFIDPrefix);
+    CPLFree(m_pszFIDPrefix);
 
     if (poFeatureDefn)
         poFeatureDefn->Release();
@@ -92,7 +77,7 @@ void OGRGMLLayer::ResetReading()
     {
         // Does the last stored feature belong to our layer ? If so, no
         // need to reset the reader.
-        if (iNextGMLId == 0 && poDS->PeekStoredGMLFeature() != nullptr &&
+        if (m_iNextGMLId == 0 && poDS->PeekStoredGMLFeature() != nullptr &&
             poDS->PeekStoredGMLFeature()->GetClass() == poFClass)
             return;
 
@@ -100,7 +85,8 @@ void OGRGMLLayer::ResetReading()
         poDS->SetStoredGMLFeature(nullptr);
     }
 
-    iNextGMLId = 0;
+    m_iNextGMLId = 0;
+    m_oSetFIDs.clear();
     poDS->GetReader()->ResetReading();
     CPLDebug("GML", "ResetReading()");
     if (poDS->GetLayerCount() > 1 && poDS->GetReadMode() == STANDARD)
@@ -145,6 +131,10 @@ OGRFeature *OGRGMLLayer::GetNextFeature()
         poDS->SetLastReadLayer(this);
     }
 
+    const bool bSkipCorruptedFeatures = CPLFetchBool(
+        poDS->GetOpenOptions(), "SKIP_CORRUPTED_FEATURES",
+        CPLTestBool(CPLGetConfigOption("GML_SKIP_CORRUPTED_FEATURES", "NO")));
+
     /* ==================================================================== */
     /*      Loop till we find and translate a feature meeting all our       */
     /*      requirements.                                                   */
@@ -177,7 +167,7 @@ OGRFeature *OGRGMLLayer::GetNextFeature()
         if (poGMLFeature->GetClass() != poFClass)
         {
             if (poDS->GetReadMode() == INTERLEAVED_LAYERS ||
-                (poDS->GetReadMode() == SEQUENTIAL_LAYERS && iNextGMLId != 0))
+                (poDS->GetReadMode() == SEQUENTIAL_LAYERS && m_iNextGMLId != 0))
             {
                 CPLAssert(poDS->PeekStoredGMLFeature() == nullptr);
                 poDS->SetStoredGMLFeature(poGMLFeature);
@@ -202,72 +192,101 @@ OGRFeature *OGRGMLLayer::GetNextFeature()
         /* --------------------------------------------------------------------
          */
         GIntBig nFID = -1;
+        constexpr size_t MAX_FID_DIGIT_COUNT = 20;
         const char *pszGML_FID = poGMLFeature->GetFID();
-        if (bInvalidFIDFound)
+        if (m_bInvalidFIDFound || pszGML_FID == nullptr || pszGML_FID[0] == 0)
         {
-            nFID = iNextGMLId;
-            iNextGMLId = Increment(iNextGMLId);
+            // do nothing
         }
-        else if (pszGML_FID == nullptr)
+        else if (m_iNextGMLId == 0)
         {
-            bInvalidFIDFound = true;
-            nFID = iNextGMLId;
-            iNextGMLId = Increment(iNextGMLId);
-        }
-        else if (iNextGMLId == 0)
-        {
-            int j = 0;
-            int i = static_cast<int>(strlen(pszGML_FID)) - 1;
-            while (i >= 0 && pszGML_FID[i] >= '0' && pszGML_FID[i] <= '9' &&
-                   j < 20)
+            size_t j = 0;
+            size_t i = strlen(pszGML_FID);
+            while (i > 0 && j < MAX_FID_DIGIT_COUNT)
             {
-                i--;
+                --i;
+                if (!(pszGML_FID[i] >= '0' && pszGML_FID[i] <= '9'))
+                    break;
                 j++;
+                if (i == 0)
+                {
+                    i = std::numeric_limits<size_t>::max();
+                    break;
+                }
             }
-            // i points the last character of the fid.
-            if (i >= 0 && j < 20 && pszFIDPrefix == nullptr)
+            // i points the last character of the fid prefix.
+            if (i != std::numeric_limits<size_t>::max() &&
+                j < MAX_FID_DIGIT_COUNT && m_pszFIDPrefix == nullptr)
             {
-                pszFIDPrefix = static_cast<char *>(CPLMalloc(i + 2));
-                pszFIDPrefix[i + 1] = '\0';
-                strncpy(pszFIDPrefix, pszGML_FID, i + 1);
+                m_pszFIDPrefix = static_cast<char *>(CPLMalloc(i + 2));
+                memcpy(m_pszFIDPrefix, pszGML_FID, i + 1);
+                m_pszFIDPrefix[i + 1] = '\0';
             }
-            // pszFIDPrefix now contains the prefix or NULL if no prefix is
+            // m_pszFIDPrefix now contains the prefix or NULL if no prefix is
             // found.
-            if (j < 20 && sscanf(pszGML_FID + i + 1, CPL_FRMT_GIB, &nFID) == 1)
+            if (j < MAX_FID_DIGIT_COUNT)
             {
-                if (iNextGMLId <= nFID)
-                    iNextGMLId = Increment(nFID);
-            }
-            else
-            {
-                bInvalidFIDFound = true;
-                nFID = iNextGMLId;
-                iNextGMLId = Increment(iNextGMLId);
+                char *endptr = nullptr;
+                nFID = std::strtoll(
+                    pszGML_FID +
+                        (i != std::numeric_limits<size_t>::max() ? i + 1 : 0),
+                    &endptr, 10);
+                if (endptr == pszGML_FID + strlen(pszGML_FID))
+                {
+                    if (m_iNextGMLId <= nFID)
+                        m_iNextGMLId = Increment(nFID);
+                }
+                else
+                {
+                    nFID = -1;
+                }
             }
         }
         else  // if( iNextGMLId != 0 ).
         {
-            const char *pszFIDPrefix_notnull = pszFIDPrefix;
+            const char *pszFIDPrefix_notnull = m_pszFIDPrefix;
             if (pszFIDPrefix_notnull == nullptr)
                 pszFIDPrefix_notnull = "";
-            int nLenPrefix = static_cast<int>(strlen(pszFIDPrefix_notnull));
+            const size_t nLenPrefix = strlen(pszFIDPrefix_notnull);
 
             if (strncmp(pszGML_FID, pszFIDPrefix_notnull, nLenPrefix) == 0 &&
-                strlen(pszGML_FID + nLenPrefix) < 20 &&
-                sscanf(pszGML_FID + nLenPrefix, CPL_FRMT_GIB, &nFID) == 1)
+                strlen(pszGML_FID + nLenPrefix) < MAX_FID_DIGIT_COUNT)
             {
-                // fid with the prefix. Using its numerical part.
-                if (iNextGMLId < nFID)
-                    iNextGMLId = Increment(nFID);
+                char *endptr = nullptr;
+                nFID = std::strtoll(pszGML_FID + nLenPrefix, &endptr, 10);
+                if (endptr == pszGML_FID + strlen(pszGML_FID))
+                {
+                    // fid with the prefix. Using its numerical part.
+                    if (m_iNextGMLId <= nFID)
+                        m_iNextGMLId = Increment(nFID);
+                }
+                else
+                {
+                    nFID = -1;
+                }
             }
+        }
+
+        constexpr size_t MAX_FID_SET_SIZE = 10 * 1000 * 1000;
+        if (nFID >= 0 && m_oSetFIDs.size() < MAX_FID_SET_SIZE)
+        {
+            // Make sure FIDs are unique
+            if (!cpl::contains(m_oSetFIDs, nFID))
+                m_oSetFIDs.insert(nFID);
             else
             {
-                // fid without the aforementioned prefix or a valid numerical
-                // part.
-                bInvalidFIDFound = true;
-                nFID = iNextGMLId;
-                iNextGMLId = Increment(iNextGMLId);
+                m_oSetFIDs.clear();
+                nFID = -1;
             }
+        }
+
+        if (nFID < 0)
+        {
+            // fid without the aforementioned prefix or a valid numerical
+            // part.
+            m_bInvalidFIDFound = true;
+            nFID = m_iNextGMLId;
+            m_iNextGMLId = Increment(m_iNextGMLId);
         }
 
         /* --------------------------------------------------------------------
@@ -373,21 +392,20 @@ OGRFeature *OGRGMLLayer::GetNextFeature()
             {
                 const CPLString osLastErrorMsg(CPLGetLastErrorMsg());
 
-                const bool bGoOn = CPLTestBool(
-                    CPLGetConfigOption("GML_SKIP_CORRUPTED_FEATURES", "NO"));
-
                 CPLError(
-                    bGoOn ? CE_Warning : CE_Failure, CPLE_AppDefined,
+                    bSkipCorruptedFeatures ? CE_Warning : CE_Failure,
+                    CPLE_AppDefined,
                     "Geometry of feature " CPL_FRMT_GIB
                     " %scannot be parsed: %s%s",
                     nFID, pszGML_FID ? CPLSPrintf("%s ", pszGML_FID) : "",
                     osLastErrorMsg.c_str(),
-                    bGoOn ? ". Skipping to next feature."
-                          : ". You may set the GML_SKIP_CORRUPTED_FEATURES "
-                            "configuration option to YES to skip to the next "
-                            "feature");
+                    bSkipCorruptedFeatures
+                        ? ". Skipping to next feature."
+                        : ". You may set the GML_SKIP_CORRUPTED_FEATURES "
+                          "configuration option to YES to skip to the next "
+                          "feature");
                 delete poGMLFeature;
-                if (bGoOn)
+                if (bSkipCorruptedFeatures)
                     continue;
                 return nullptr;
             }
@@ -589,8 +607,6 @@ OGRFeature *OGRGMLLayer::GetNextFeature()
         // Got the desired feature.
         return poOGRFeature;
     }
-
-    return nullptr;
 }
 
 /************************************************************************/
@@ -619,10 +635,11 @@ GIntBig OGRGMLLayer::GetFeatureCount(int bForce)
 }
 
 /************************************************************************/
-/*                             GetExtent()                              */
+/*                            IGetExtent()                              */
 /************************************************************************/
 
-OGRErr OGRGMLLayer::GetExtent(OGREnvelope *psExtent, int bForce)
+OGRErr OGRGMLLayer::IGetExtent(int iGeomField, OGREnvelope *psExtent,
+                               bool bForce)
 
 {
     if (GetGeomType() == wkbNone)
@@ -643,7 +660,7 @@ OGRErr OGRGMLLayer::GetExtent(OGREnvelope *psExtent, int bForce)
         return OGRERR_NONE;
     }
 
-    return OGRLayer::GetExtent(psExtent, bForce);
+    return OGRLayer::IGetExtent(iGeomField, psExtent, bForce);
 }
 
 /************************************************************************/
@@ -685,7 +702,7 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
     const bool bRemoveAppPrefix = poDS->RemoveAppPrefix();
     const bool bGMLFeatureCollection = poDS->GMLFeatureCollection();
 
-    if (!bWriter)
+    if (!bWriter || poDS->HasWriteError())
         return OGRERR_FAILURE;
 
     poFeature->FillUnsetWithDefault(TRUE, nullptr);
@@ -708,35 +725,8 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
         poDS->PrintLine(fp, "<gml:featureMember>");
     }
 
-    if (iNextGMLId == 0)
-    {
-        bSameSRS = true;
-        for (int iGeomField = 1;
-             iGeomField < poFeatureDefn->GetGeomFieldCount(); iGeomField++)
-        {
-            OGRGeomFieldDefn *poFieldDefn0 = poFeatureDefn->GetGeomFieldDefn(0);
-            OGRGeomFieldDefn *poFieldDefn =
-                poFeatureDefn->GetGeomFieldDefn(iGeomField);
-            const OGRSpatialReference *poSRS0 = poFieldDefn0->GetSpatialRef();
-            const OGRSpatialReference *poSRS = poFieldDefn->GetSpatialRef();
-            if (poSRS0 != nullptr && poSRS == nullptr)
-            {
-                bSameSRS = false;
-            }
-            else if (poSRS0 == nullptr && poSRS != nullptr)
-            {
-                bSameSRS = false;
-            }
-            else if (poSRS0 != nullptr && poSRS != nullptr && poSRS0 != poSRS &&
-                     !poSRS0->IsSame(poSRS))
-            {
-                bSameSRS = false;
-            }
-        }
-    }
-
     if (poFeature->GetFID() == OGRNullFID)
-        poFeature->SetFID(iNextGMLId++);
+        poFeature->SetFID(m_iNextGMLId++);
 
     if (bWriteSpaceIndentation)
         VSIFPrintfL(fp, "    ");
@@ -781,7 +771,7 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
     for (int iGeomField = 0; iGeomField < poFeatureDefn->GetGeomFieldCount();
          iGeomField++)
     {
-        OGRGeomFieldDefn *poFieldDefn =
+        const OGRGeomFieldDefn *poFieldDefn =
             poFeatureDefn->GetGeomFieldDefn(iGeomField);
 
         // Write out Geometry - for now it isn't indented properly.
@@ -794,12 +784,14 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
             const int nCoordDimension = poGeom->getCoordinateDimension();
 
             poGeom->getEnvelope(&sGeomBounds);
-            if (bSameSRS)
+            if (poDS->HasWriteGlobalSRS())
                 poDS->GrowExtents(&sGeomBounds, nCoordDimension);
 
             if (poGeom->getSpatialReference() == nullptr &&
                 poFieldDefn->GetSpatialRef() != nullptr)
                 poGeom->assignSpatialReference(poFieldDefn->GetSpatialRef());
+
+            const auto &oCoordPrec = poFieldDefn->GetCoordinatePrecision();
 
             if (bIsGML3Output && poDS->WriteFeatureBoundedBy())
             {
@@ -810,23 +802,50 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
                                    poDS->GetSRSNameFormat(), &bCoordSwap);
                 char szLowerCorner[75] = {};
                 char szUpperCorner[75] = {};
+
+                OGRWktOptions coordOpts;
+
+                if (oCoordPrec.dfXYResolution !=
+                    OGRGeomCoordinatePrecision::UNKNOWN)
+                {
+                    coordOpts.format = OGRWktFormat::F;
+                    coordOpts.xyPrecision =
+                        OGRGeomCoordinatePrecision::ResolutionToPrecision(
+                            oCoordPrec.dfXYResolution);
+                }
+                if (oCoordPrec.dfZResolution !=
+                    OGRGeomCoordinatePrecision::UNKNOWN)
+                {
+                    coordOpts.format = OGRWktFormat::F;
+                    coordOpts.zPrecision =
+                        OGRGeomCoordinatePrecision::ResolutionToPrecision(
+                            oCoordPrec.dfZResolution);
+                }
+
+                std::string wkt;
                 if (bCoordSwap)
                 {
-                    OGRMakeWktCoordinate(szLowerCorner, sGeomBounds.MinY,
-                                         sGeomBounds.MinX, sGeomBounds.MinZ,
-                                         nCoordDimension);
-                    OGRMakeWktCoordinate(szUpperCorner, sGeomBounds.MaxY,
-                                         sGeomBounds.MaxX, sGeomBounds.MaxZ,
-                                         nCoordDimension);
+                    wkt = OGRMakeWktCoordinate(
+                        sGeomBounds.MinY, sGeomBounds.MinX, sGeomBounds.MinZ,
+                        nCoordDimension, coordOpts);
+                    memcpy(szLowerCorner, wkt.data(), wkt.size() + 1);
+
+                    wkt = OGRMakeWktCoordinate(
+                        sGeomBounds.MaxY, sGeomBounds.MaxX, sGeomBounds.MaxZ,
+                        nCoordDimension, coordOpts);
+                    memcpy(szUpperCorner, wkt.data(), wkt.size() + 1);
                 }
                 else
                 {
-                    OGRMakeWktCoordinate(szLowerCorner, sGeomBounds.MinX,
-                                         sGeomBounds.MinY, sGeomBounds.MinZ,
-                                         nCoordDimension);
-                    OGRMakeWktCoordinate(szUpperCorner, sGeomBounds.MaxX,
-                                         sGeomBounds.MaxY, sGeomBounds.MaxZ,
-                                         nCoordDimension);
+                    wkt = OGRMakeWktCoordinate(
+                        sGeomBounds.MinX, sGeomBounds.MinY, sGeomBounds.MinZ,
+                        nCoordDimension, coordOpts);
+                    memcpy(szLowerCorner, wkt.data(), wkt.size() + 1);
+
+                    wkt = OGRMakeWktCoordinate(
+                        sGeomBounds.MaxX, sGeomBounds.MaxY, sGeomBounds.MaxZ,
+                        nCoordDimension, coordOpts);
+                    memcpy(szUpperCorner, wkt.data(), wkt.size() + 1);
                 }
                 if (bWriteSpaceIndentation)
                     VSIFPrintfL(fp, "      ");
@@ -871,6 +890,20 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
                         papszOptions, CPLSPrintf("GMLID=%s.geom." CPL_FRMT_GIB,
                                                  poFeatureDefn->GetName(),
                                                  poFeature->GetFID()));
+            }
+
+            if (oCoordPrec.dfXYResolution !=
+                OGRGeomCoordinatePrecision::UNKNOWN)
+            {
+                papszOptions = CSLAddString(
+                    papszOptions, CPLSPrintf("XY_COORD_RESOLUTION=%g",
+                                             oCoordPrec.dfXYResolution));
+            }
+            if (oCoordPrec.dfZResolution != OGRGeomCoordinatePrecision::UNKNOWN)
+            {
+                papszOptions = CSLAddString(
+                    papszOptions, CPLSPrintf("Z_COORD_RESOLUTION=%g",
+                                             oCoordPrec.dfZResolution));
             }
 
             char *pszGeometry = nullptr;
@@ -1091,24 +1124,24 @@ OGRErr OGRGMLLayer::ICreateFeature(OGRFeature *poFeature)
         poDS->PrintLine(fp, "</gml:featureMember>");
     }
 
-    return OGRERR_NONE;
+    return !poDS->HasWriteError() ? OGRERR_NONE : OGRERR_FAILURE;
 }
 
 /************************************************************************/
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRGMLLayer::TestCapability(const char *pszCap)
+int OGRGMLLayer::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, OLCSequentialWrite))
         return bWriter;
 
     else if (EQUAL(pszCap, OLCCreateField))
-        return bWriter && iNextGMLId == 0;
+        return bWriter && m_iNextGMLId == 0;
 
     else if (EQUAL(pszCap, OLCCreateGeomField))
-        return bWriter && iNextGMLId == 0;
+        return bWriter && m_iNextGMLId == 0;
 
     else if (EQUAL(pszCap, OLCFastGetExtent))
     {
@@ -1149,10 +1182,10 @@ int OGRGMLLayer::TestCapability(const char *pszCap)
 /*                            CreateField()                             */
 /************************************************************************/
 
-OGRErr OGRGMLLayer::CreateField(OGRFieldDefn *poField, int bApproxOK)
+OGRErr OGRGMLLayer::CreateField(const OGRFieldDefn *poField, int bApproxOK)
 
 {
-    if (!bWriter || iNextGMLId != 0)
+    if (!bWriter || m_iNextGMLId != 0)
         return OGRERR_FAILURE;
 
     /* -------------------------------------------------------------------- */
@@ -1192,17 +1225,19 @@ OGRErr OGRGMLLayer::CreateField(OGRFieldDefn *poField, int bApproxOK)
 /*                          CreateGeomField()                           */
 /************************************************************************/
 
-OGRErr OGRGMLLayer::CreateGeomField(OGRGeomFieldDefn *poField, int bApproxOK)
+OGRErr OGRGMLLayer::CreateGeomField(const OGRGeomFieldDefn *poField,
+                                    int bApproxOK)
 
 {
-    if (!bWriter || iNextGMLId != 0)
+    if (!bWriter || m_iNextGMLId != 0)
         return OGRERR_FAILURE;
 
     /* -------------------------------------------------------------------- */
     /*      Enforce XML naming semantics on element name.                   */
     /* -------------------------------------------------------------------- */
     OGRGeomFieldDefn oCleanCopy(poField);
-    auto poSRSOri = poField->GetSpatialRef();
+    const auto poSRSOri = poField->GetSpatialRef();
+    poDS->DeclareNewWriteSRS(poSRSOri);
     if (poSRSOri)
     {
         auto poSRS = poSRSOri->Clone();
@@ -1237,4 +1272,13 @@ OGRErr OGRGMLLayer::CreateGeomField(OGRGeomFieldDefn *poField, int bApproxOK)
     poFeatureDefn->AddGeomFieldDefn(&oCleanCopy);
 
     return OGRERR_NONE;
+}
+
+/************************************************************************/
+/*                             GetDataset()                             */
+/************************************************************************/
+
+GDALDataset *OGRGMLLayer::GetDataset()
+{
+    return poDS;
 }

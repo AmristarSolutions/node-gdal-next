@@ -224,7 +224,7 @@ NODE_WRAPPED_METHOD_WITH_CPLERR_RESULT_1_INTEGER_PARAM_LOCKED(RasterBand, create
  * @method getMaskBand
  * @instance
  * @memberof RasterBand
- * @return {RasterBand}
+ * @return {RasterBand|null}
  */
 NAN_METHOD(RasterBand::getMaskBand) {
   NODE_UNWRAP_CHECK(RasterBand, info.This(), band);
@@ -1297,11 +1297,11 @@ NAN_SETTER(RasterBand::categoryNamesSetter) {
   Local<Array> names = value.As<Array>();
 
   char **list = NULL;
-  std::shared_ptr<std::string> strlist;
+  std::shared_ptr<std::string[]> strlist;
 
   if (names->Length() > 0) {
     list = new char *[names->Length() + 1];
-    strlist = std::shared_ptr<std::string>(new std::string[names->Length()], array_deleter<std::string>());
+    strlist = std::shared_ptr<std::string[]>(new std::string[names->Length()]);
     unsigned int i;
     for (i = 0; i < names->Length(); i++) {
       strlist.get()[i] = *Nan::Utf8String(Nan::Get(names, i).ToLocalChecked());

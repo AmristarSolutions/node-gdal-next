@@ -7,27 +7,11 @@
  ******************************************************************************
  * Copyright (c) 2014-2019, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "mongocxxv3_headers.h"
+#include "ogrmongodbv3drivercore.h"
 
 #include "cpl_time.h"
 #include "gdal_priv.h"
@@ -61,6 +45,7 @@ struct _IntOrMap
 {
     // cppcheck-suppress unusedStructMember
     int bIsMap;
+
     union
     {
         // cppcheck-suppress unusedStructMember
@@ -94,11 +79,12 @@ class OGRMongoDBv3Dataset final : public GDALDataset
   public:
     OGRMongoDBv3Dataset() = default;
 
-    int GetLayerCount() override
+    int GetLayerCount() const override
     {
         return static_cast<int>(m_apoLayers.size());
     }
-    OGRLayer *GetLayer(int) override;
+
+    const OGRLayer *GetLayer(int) const override;
     OGRLayer *GetLayerByName(const char *pszLayerName) override;
 
     OGRLayer *ExecuteSQL(const char *pszSQLCommand,
@@ -107,11 +93,10 @@ class OGRMongoDBv3Dataset final : public GDALDataset
     void ReleaseResultSet(OGRLayer *poLayer) override;
 
     OGRLayer *ICreateLayer(const char *pszName,
-                           const OGRSpatialReference *poSpatialRef,
-                           OGRwkbGeometryType eGType,
-                           char **papszOptions) override;
+                           const OGRGeomFieldDefn *poGeomFieldDefn,
+                           CSLConstList papszOptions) override;
     OGRErr DeleteLayer(int iLayer) override;
-    int TestCapability(const char *pszCap) override;
+    int TestCapability(const char *pszCap) const override;
 
     bool Open(GDALOpenInfo *poOpenInfo);
 };
@@ -188,21 +173,19 @@ class OGRMongoDBv3Layer final : public OGRLayer
     ~OGRMongoDBv3Layer() override;
 
     void ResetReading() override;
-    const char *GetFIDColumn() override;
+    const char *GetFIDColumn() const override;
     OGRFeature *GetNextFeature() override;
     OGRFeature *GetFeature(GIntBig nFID) override;
     OGRErr DeleteFeature(GIntBig nFID) override;
     GIntBig GetFeatureCount(int bForce) override;
     OGRErr SetAttributeFilter(const char *pszFilter) override;
-    void SetSpatialFilter(OGRGeometry *poGeom) override
-    {
-        SetSpatialFilter(0, poGeom);
-    }
-    void SetSpatialFilter(int iGeomField, OGRGeometry *poGeom) override;
-    int TestCapability(const char *pszCap) override;
-    OGRFeatureDefn *GetLayerDefn() override;
-    OGRErr CreateField(OGRFieldDefn *poFieldIn, int) override;
-    OGRErr CreateGeomField(OGRGeomFieldDefn *poFieldIn, int) override;
+
+    OGRErr ISetSpatialFilter(int iGeomField,
+                             const OGRGeometry *poGeom) override;
+    int TestCapability(const char *pszCap) const override;
+    const OGRFeatureDefn *GetLayerDefn() const override;
+    OGRErr CreateField(const OGRFieldDefn *poFieldIn, int) override;
+    OGRErr CreateGeomField(const OGRGeomFieldDefn *poFieldIn, int) override;
     OGRErr ICreateFeature(OGRFeature *poFeature) override;
     OGRErr ISetFeature(OGRFeature *poFeature) override;
     OGRErr IUpsertFeature(OGRFeature *poFeature) override;
@@ -213,6 +196,11 @@ class OGRMongoDBv3Layer final : public OGRLayer
                           bool bUpdateStyleString) override;
 
     OGRErr SyncToDisk() override;
+
+    GDALDataset *GetDataset() override
+    {
+        return m_poDS;
+    }
 };
 
 /************************************************************************/
@@ -385,10 +373,10 @@ void OGRMongoDBv3Layer::ResetReading()
 /*                            GetLayerDefn()                            */
 /************************************************************************/
 
-OGRFeatureDefn *OGRMongoDBv3Layer::GetLayerDefn()
+const OGRFeatureDefn *OGRMongoDBv3Layer::GetLayerDefn() const
 {
     if (!m_bHasEstablishedFeatureDefn)
-        EstablishFeatureDefn();
+        const_cast<OGRMongoDBv3Layer *>(this)->EstablishFeatureDefn();
 
     return m_poFeatureDefn;
 }
@@ -415,7 +403,11 @@ OGRMongoDBv3GetFieldTypeFromBSON(const bsoncxx::document::element &elt,
         return OFTInteger;
     else if (eBSONType == bsoncxx::type::k_int64)
         return OFTInteger64;
+#if BSONCXX_VERSION_MAJOR >= 4
+    else if (eBSONType == bsoncxx::type::k_string)
+#else
     else if (eBSONType == bsoncxx::type::k_utf8)
+#endif
         return OFTString;
     else if (eBSONType == bsoncxx::type::k_array)
     {
@@ -458,7 +450,11 @@ OGRMongoDBv3GetFieldTypeFromBSON(const bsoncxx::document::element &elt,
 
 static std::string get_string(const bsoncxx::document::element &elt)
 {
+#if BSONCXX_VERSION_MAJOR >= 4
+    CPLAssert(elt.type() == bsoncxx::type::k_string);
+#else
     CPLAssert(elt.type() == bsoncxx::type::k_utf8);
+#endif
 #if BSONCXX_VERSION_MAJOR > 3 || BSONCXX_VERSION_MINOR >= 7
     return std::string(elt.get_string().value);
 #else
@@ -468,7 +464,11 @@ static std::string get_string(const bsoncxx::document::element &elt)
 
 static std::string get_string(const bsoncxx::array::element &elt)
 {
+#if BSONCXX_VERSION_MAJOR >= 4
+    CPLAssert(elt.type() == bsoncxx::type::k_string);
+#else
     CPLAssert(elt.type() == bsoncxx::type::k_utf8);
+#endif
 #if BSONCXX_VERSION_MAJOR > 3 || BSONCXX_VERSION_MINOR >= 7
     return std::string(elt.get_string().value);
 #else
@@ -496,7 +496,11 @@ void OGRMongoDBv3Layer::AddOrUpdateField(
     {
         bsoncxx::document::view doc{elt.get_document()};
         auto eltType = doc["type"];
+#if BSONCXX_VERSION_MAJOR >= 4
+        if (eltType && eltType.type() == bsoncxx::type::k_string)
+#else
         if (eltType && eltType.type() == bsoncxx::type::k_utf8)
+#endif
         {
             OGRwkbGeometryType eGeomType =
                 OGRFromOGCGeomType(get_string(eltType).c_str());
@@ -618,7 +622,11 @@ std::map<CPLString, CPLString> OGRMongoDBv3Layer::CollectGeomIndices()
                 bsoncxx::document::view keyDoc{key.get_document()};
                 for (auto &&field : keyDoc)
                 {
+#if BSONCXX_VERSION_MAJOR >= 4
+                    if (field.type() == bsoncxx::type::k_string)
+#else
                     if (field.type() == bsoncxx::type::k_utf8)
+#endif
                     {
                         const std::string v(get_string(field));
                         if (v == "2d" || v == "2dsphere")
@@ -658,7 +666,11 @@ bool OGRMongoDBv3Layer::ReadOGRMetadata(
         {
             auto doc = docOpt->view();
             auto fid = doc["fid"];
+#if BSONCXX_VERSION_MAJOR >= 4
+            if (fid && fid.type() == bsoncxx::type::k_string)
+#else
             if (fid && fid.type() == bsoncxx::type::k_utf8)
+#endif
                 m_osFID = get_string(fid);
 
             auto fields = doc["fields"];
@@ -675,8 +687,13 @@ bool OGRMongoDBv3Layer::ReadOGRMetadata(
                         auto type = obj2["type"];
                         auto subtype = obj2["subtype"];
                         auto path = obj2["path"];
+#if BSONCXX_VERSION_MAJOR >= 4
+                        if (name && name.type() == bsoncxx::type::k_string &&
+                            type && type.type() == bsoncxx::type::k_string &&
+#else
                         if (name && name.type() == bsoncxx::type::k_utf8 &&
                             type && type.type() == bsoncxx::type::k_utf8 &&
+#endif
                             path && path.type() == bsoncxx::type::k_array)
                         {
                             if (get_string(name) == "_id")
@@ -698,7 +715,11 @@ bool OGRMongoDBv3Layer::ReadOGRMetadata(
                             bool ok = true;
                             for (const auto &eltPath : oPathArray)
                             {
+#if BSONCXX_VERSION_MAJOR >= 4
+                                if (eltPath.type() != bsoncxx::type::k_string)
+#else
                                 if (eltPath.type() != bsoncxx::type::k_utf8)
+#endif
                                 {
                                     ok = false;
                                     break;
@@ -711,7 +732,11 @@ bool OGRMongoDBv3Layer::ReadOGRMetadata(
                             OGRFieldDefn oFieldDefn(get_string(name).c_str(),
                                                     eType);
                             if (subtype &&
+#if BSONCXX_VERSION_MAJOR >= 4
+                                subtype.type() == bsoncxx::type::k_string &&
+#else
                                 subtype.type() == bsoncxx::type::k_utf8 &&
+#endif
                                 get_string(subtype) == "Boolean")
                             {
                                 // cppcheck-suppress danglingTemporaryLifetime
@@ -739,8 +764,13 @@ bool OGRMongoDBv3Layer::ReadOGRMetadata(
                         auto name = obj2["name"];
                         auto type = obj2["type"];
                         auto path = obj2["path"];
+#if BSONCXX_VERSION_MAJOR >= 4
+                        if (name && name.type() == bsoncxx::type::k_string &&
+                            type && type.type() == bsoncxx::type::k_string &&
+#else
                         if (name && name.type() == bsoncxx::type::k_utf8 &&
                             type && type.type() == bsoncxx::type::k_utf8 &&
+#endif
                             path && path.type() == bsoncxx::type::k_array)
                         {
 
@@ -749,7 +779,11 @@ bool OGRMongoDBv3Layer::ReadOGRMetadata(
                             bool ok = true;
                             for (const auto &eltPath : oPathArray)
                             {
+#if BSONCXX_VERSION_MAJOR >= 4
+                                if (eltPath.type() != bsoncxx::type::k_string)
+#else
                                 if (eltPath.type() != bsoncxx::type::k_utf8)
+#endif
                                 {
                                     ok = false;
                                     break;
@@ -879,10 +913,10 @@ void OGRMongoDBv3Layer::EstablishFeatureDefn()
 /*                            GetFIDColumn()                            */
 /************************************************************************/
 
-const char *OGRMongoDBv3Layer::GetFIDColumn()
+const char *OGRMongoDBv3Layer::GetFIDColumn() const
 {
     if (!m_bHasEstablishedFeatureDefn)
-        EstablishFeatureDefn();
+        const_cast<OGRMongoDBv3Layer *>(this)->EstablishFeatureDefn();
     return m_osFID.c_str();
 }
 
@@ -945,7 +979,11 @@ static CPLString Stringify(const bsoncxx::types::value &val)
 #endif
 {
     const auto eBSONType = val.type();
+#if BSONCXX_VERSION_MAJOR >= 4
+    if (eBSONType == bsoncxx::type::k_string)
+#else
     if (eBSONType == bsoncxx::type::k_utf8)
+#endif
     {
 #if BSONCXX_VERSION_MAJOR > 3 || BSONCXX_VERSION_MINOR >= 7
         return std::string(val.get_string().value);
@@ -1073,7 +1111,7 @@ static void OGRMongoDBV3ReaderSetField(OGRFeature *poFeature,
     int nField = poFeature->GetFieldIndex(pszAttrName);
     if (nField < 0)
         return;
-    OGRFieldDefn *poFieldDefn = poFeature->GetFieldDefnRef(nField);
+    const OGRFieldDefn *poFieldDefn = poFeature->GetFieldDefnRef(nField);
     CPLAssert(nullptr != poFieldDefn);
     OGRFieldType eType = poFieldDefn->GetType();
     if (eBSONType == bsoncxx::type::k_null)
@@ -1216,7 +1254,11 @@ static void OGRMongoDBV3ReaderSetField(OGRFeature *poFeature,
             CPLFree(panValues);
         }
     }
+#if BSONCXX_VERSION_MAJOR >= 4
+    else if (eBSONType == bsoncxx::type::k_string)
+#else
     else if (eBSONType == bsoncxx::type::k_utf8)
+#endif
     {
         poFeature->SetField(nField, get_string(elt).c_str());
     }
@@ -1242,7 +1284,7 @@ static void OGRMongoDBV3ReaderSetField(OGRFeature *poFeature,
 std::unique_ptr<OGRFeature>
 OGRMongoDBv3Layer::Translate(const bsoncxx::document::view &doc)
 {
-    auto poFeature = cpl::make_unique<OGRFeature>(m_poFeatureDefn);
+    auto poFeature = std::make_unique<OGRFeature>(m_poFeatureDefn);
     for (auto &&field : doc)
     {
         std::string fieldName(field.key());
@@ -1428,7 +1470,7 @@ OGRErr OGRMongoDBv3Layer::DeleteFeature(GIntBig nFID)
 /*                            CreateField()                             */
 /************************************************************************/
 
-OGRErr OGRMongoDBv3Layer::CreateField(OGRFieldDefn *poFieldIn, int)
+OGRErr OGRMongoDBv3Layer::CreateField(const OGRFieldDefn *poFieldIn, int)
 
 {
     if (m_poDS->GetAccess() != GA_Update)
@@ -1474,7 +1516,8 @@ OGRErr OGRMongoDBv3Layer::CreateField(OGRFieldDefn *poFieldIn, int)
 /*                           CreateGeomField()                          */
 /************************************************************************/
 
-OGRErr OGRMongoDBv3Layer::CreateGeomField(OGRGeomFieldDefn *poFieldIn, int)
+OGRErr OGRMongoDBv3Layer::CreateGeomField(const OGRGeomFieldDefn *poFieldIn,
+                                          int)
 
 {
     if (m_poDS->GetAccess() != GA_Update)
@@ -2106,7 +2149,7 @@ OGRErr OGRMongoDBv3Layer::IUpdateFeature(OGRFeature *poFeature,
 /*                            TestCapability()                          */
 /************************************************************************/
 
-int OGRMongoDBv3Layer::TestCapability(const char *pszCap)
+int OGRMongoDBv3Layer::TestCapability(const char *pszCap) const
 {
     if (EQUAL(pszCap, OLCStringsAsUTF8))
     {
@@ -2114,13 +2157,12 @@ int OGRMongoDBv3Layer::TestCapability(const char *pszCap)
     }
     if (EQUAL(pszCap, OLCRandomRead))
     {
-        EstablishFeatureDefn();
-        return !m_osFID.empty();
+        return const_cast<OGRMongoDBv3Layer *>(this)->GetFIDColumn()[0] != 0;
     }
     if (EQUAL(pszCap, OLCFastSpatialFilter))
     {
-        EstablishFeatureDefn();
-        for (int i = 0; i < m_poFeatureDefn->GetGeomFieldCount(); i++)
+        const int nGeomFieldCount = GetLayerDefn()->GetGeomFieldCount();
+        for (int i = 0; i < nGeomFieldCount; i++)
         {
             if (m_aosGeomIndexes[i] == "none")
             {
@@ -2137,8 +2179,8 @@ int OGRMongoDBv3Layer::TestCapability(const char *pszCap)
     }
     else if (EQUAL(pszCap, OLCDeleteFeature))
     {
-        EstablishFeatureDefn();
-        return m_poDS->GetAccess() == GA_Update && !m_osFID.empty();
+        return m_poDS->GetAccess() == GA_Update &&
+               const_cast<OGRMongoDBv3Layer *>(this)->GetFIDColumn()[0] != 0;
     }
 
     return false;
@@ -2171,22 +2213,13 @@ OGRErr OGRMongoDBv3Layer::SetAttributeFilter(const char *pszFilter)
 }
 
 /************************************************************************/
-/*                          SetSpatialFilter()                          */
+/*                          ISetSpatialFilter()                         */
 /************************************************************************/
 
-void OGRMongoDBv3Layer::SetSpatialFilter(int iGeomField, OGRGeometry *poGeomIn)
+OGRErr OGRMongoDBv3Layer::ISetSpatialFilter(int iGeomField,
+                                            const OGRGeometry *poGeomIn)
 
 {
-    if (iGeomField < 0 || iGeomField >= GetLayerDefn()->GetGeomFieldCount() ||
-        GetLayerDefn()->GetGeomFieldDefn(iGeomField)->GetType() == wkbNone)
-    {
-        if (iGeomField != 0)
-        {
-            CPLError(CE_Failure, CPLE_AppDefined,
-                     "Invalid geometry field index : %d", iGeomField);
-        }
-        return;
-    }
     m_iGeomFieldFilter = iGeomField;
 
     m_oQuerySpat = bsoncxx::builder::basic::make_document();
@@ -2210,7 +2243,7 @@ void OGRMongoDBv3Layer::SetSpatialFilter(int iGeomField, OGRGeometry *poGeomIn)
         if (sEnvelope.MinX == -180 && sEnvelope.MinY == -90 &&
             sEnvelope.MaxX == 180 && sEnvelope.MaxY == 90)
         {
-            return;
+            return OGRERR_NONE;
         }
 
         try
@@ -2244,15 +2277,17 @@ void OGRMongoDBv3Layer::SetSpatialFilter(int iGeomField, OGRGeometry *poGeomIn)
         {
             CPLError(CE_Failure, CPLE_AppDefined, "%s: %s",
                      "SetSpatialFilter()", ex.what());
+            return OGRERR_FAILURE;
         }
     }
+    return OGRERR_NONE;
 }
 
 /************************************************************************/
 /*                              GetLayer()                              */
 /************************************************************************/
 
-OGRLayer *OGRMongoDBv3Dataset::GetLayer(int nIndex)
+const OGRLayer *OGRMongoDBv3Dataset::GetLayer(int nIndex) const
 {
     if (nIndex < 0 || nIndex >= GetLayerCount())
         return nullptr;
@@ -2510,9 +2545,10 @@ bool OGRMongoDBv3Dataset::Open(GDALOpenInfo *poOpenInfo)
 /*                            ICreateLayer()                            */
 /************************************************************************/
 
-OGRLayer *OGRMongoDBv3Dataset::ICreateLayer(
-    const char *pszName, const OGRSpatialReference *poSpatialRef,
-    OGRwkbGeometryType eGType, char **papszOptions)
+OGRLayer *
+OGRMongoDBv3Dataset::ICreateLayer(const char *pszName,
+                                  const OGRGeomFieldDefn *poGeomFieldDefn,
+                                  CSLConstList papszOptions)
 {
     if (m_osDatabase.empty())
     {
@@ -2575,17 +2611,12 @@ OGRLayer *OGRMongoDBv3Dataset::ICreateLayer(
     poLayer->m_bCreateSpatialIndex =
         CPLFetchBool(papszOptions, "SPATIAL_INDEX", true);
 
-    if (eGType != wkbNone)
+    if (poGeomFieldDefn && poGeomFieldDefn->GetType() != wkbNone)
     {
         const char *pszGeometryName =
             CSLFetchNameValueDef(papszOptions, "GEOMETRY_NAME", "geometry");
-        OGRGeomFieldDefn oFieldDefn(pszGeometryName, eGType);
-        OGRSpatialReference *poSRSClone = nullptr;
-        if (poSpatialRef)
-            poSRSClone = poSpatialRef->Clone();
-        oFieldDefn.SetSpatialRef(poSRSClone);
-        if (poSRSClone)
-            poSRSClone->Release();
+        OGRGeomFieldDefn oFieldDefn(poGeomFieldDefn);
+        oFieldDefn.SetName(pszGeometryName);
         poLayer->CreateGeomField(&oFieldDefn, FALSE);
     }
 
@@ -2644,7 +2675,7 @@ OGRErr OGRMongoDBv3Dataset::DeleteLayer(int iLayer)
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRMongoDBv3Dataset::TestCapability(const char *pszCap)
+int OGRMongoDBv3Dataset::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, ODsCCreateLayer) || EQUAL(pszCap, ODsCDeleteLayer) ||
@@ -2666,20 +2697,25 @@ class OGRMongoDBv3SingleFeatureLayer final : public OGRLayer
 
   public:
     explicit OGRMongoDBv3SingleFeatureLayer(const char *pszVal);
+
     ~OGRMongoDBv3SingleFeatureLayer()
     {
         m_poFeatureDefn->Release();
     }
+
     void ResetReading() override
     {
         iNextShapeId = 0;
     }
+
     OGRFeature *GetNextFeature() override;
-    OGRFeatureDefn *GetLayerDefn() override
+
+    const OGRFeatureDefn *GetLayerDefn() const override
     {
         return m_poFeatureDefn;
     }
-    int TestCapability(const char *) override
+
+    int TestCapability(const char *) const override
     {
         return FALSE;
     }
@@ -2820,19 +2856,6 @@ void OGRMongoDBv3Dataset::ReleaseResultSet(OGRLayer *poLayer)
 }
 
 /************************************************************************/
-/*                   OGRMongoDBv3DriverIdentify()                       */
-/************************************************************************/
-
-static int OGRMongoDBv3DriverIdentify(GDALOpenInfo *poOpenInfo)
-
-{
-    return STARTS_WITH_CI(poOpenInfo->pszFilename, "MongoDBv3:") ||
-           STARTS_WITH_CI(poOpenInfo->pszFilename, "mongodb+srv:") ||
-           (STARTS_WITH_CI(poOpenInfo->pszFilename, "mongodb:") &&
-            GDALGetDriverByName("MONGODB") == nullptr);
-}
-
-/************************************************************************/
 /*                     OGRMongoDBv3DriverOpen()                         */
 /************************************************************************/
 
@@ -2906,102 +2929,20 @@ static void OGRMongoDBv3DriverUnload(GDALDriver *)
         g_bCanInstantiateMongo = false;
     }
 }
+
 /************************************************************************/
 /*                       RegisterOGRMongoDBv3()                         */
 /************************************************************************/
 
 void RegisterOGRMongoDBv3()
 {
-    if (GDALGetDriverByName("MongoDBv3") != nullptr)
+    if (GDALGetDriverByName(DRIVER_NAME) != nullptr)
         return;
 
     GDALDriver *poDriver = new GDALDriver();
-
-    poDriver->SetDescription("MongoDBv3");
-    poDriver->SetMetadataItem(GDAL_DCAP_VECTOR, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_CREATE_LAYER, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_DELETE_LAYER, "YES");
-    poDriver->SetMetadataItem(GDAL_DCAP_CREATE_FIELD, "YES");
-    poDriver->SetMetadataItem(GDAL_DMD_LONGNAME,
-                              "MongoDB (using libmongocxx v3 client)");
-    poDriver->SetMetadataItem(GDAL_DMD_HELPTOPIC,
-                              "drivers/vector/mongodbv3.html");
-    poDriver->SetMetadataItem(GDAL_DMD_SUPPORTED_SQL_DIALECTS,
-                              "OGRSQL SQLITE MongoDB");
-
-    poDriver->SetMetadataItem(GDAL_DMD_CONNECTION_PREFIX, "MongoDBv3:");
-
-    poDriver->SetMetadataItem(
-        GDAL_DS_LAYER_CREATIONOPTIONLIST,
-        "<LayerCreationOptionList>"
-        "  <Option name='OVERWRITE' type='boolean' description='Whether to "
-        "overwrite an existing collection with the layer name to be created' "
-        "default='NO'/>"
-        "  <Option name='GEOMETRY_NAME' type='string' description='Name of "
-        "geometry column.' default='geometry'/>"
-        "  <Option name='SPATIAL_INDEX' type='boolean' description='Whether to "
-        "create a spatial index' default='YES'/>"
-        "  <Option name='FID' type='string' description='Field name, with "
-        "integer values, to use as FID' default='ogc_fid'/>"
-        "  <Option name='WRITE_OGR_METADATA' type='boolean' "
-        "description='Whether to create a description of layer fields in the "
-        "_ogr_metadata collection' default='YES'/>"
-        "  <Option name='DOT_AS_NESTED_FIELD' type='boolean' "
-        "description='Whether to consider dot character in field name as "
-        "sub-document' default='YES'/>"
-        "  <Option name='IGNORE_SOURCE_ID' type='boolean' description='Whether "
-        "to ignore _id field in features passed to CreateFeature()' "
-        "default='NO'/>"
-        "</LayerCreationOptionList>");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_OPENOPTIONLIST,
-        "<OpenOptionList>"
-        "  <Option name='URI' type='string' description='Connection URI' />"
-        "  <Option name='HOST' type='string' description='Server hostname' />"
-        "  <Option name='PORT' type='integer' description='Server port' />"
-        "  <Option name='DBNAME' type='string' description='Database name' />"
-        "  <Option name='USER' type='string' description='User name' />"
-        "  <Option name='PASSWORD' type='string' description='User password' />"
-        "  <Option name='SSL_PEM_KEY_FILE' type='string' description='SSL PEM "
-        "certificate/key filename' />"
-        "  <Option name='SSL_PEM_KEY_PASSWORD' type='string' description='SSL "
-        "PEM key password' />"
-        "  <Option name='SSL_CA_FILE' type='string' description='SSL "
-        "Certification Authority filename' />"
-        "  <Option name='SSL_CRL_FILE' type='string' description='SSL "
-        "Certification Revocation List filename' />"
-        "  <Option name='SSL_ALLOW_INVALID_CERTIFICATES' type='boolean' "
-        "description='Whether to allow connections to servers with invalid "
-        "certificates' default='NO'/>"
-        "  <Option name='BATCH_SIZE' type='integer' description='Number of "
-        "features to retrieve per batch'/>"
-        "  <Option name='FEATURE_COUNT_TO_ESTABLISH_FEATURE_DEFN' "
-        "type='integer' description='Number of features to retrieve to "
-        "establish feature definition. -1 = unlimited' default='100'/>"
-        "  <Option name='JSON_FIELD' type='boolean' description='Whether to "
-        "include a field with the full document as JSON' default='NO'/>"
-        "  <Option name='FLATTEN_NESTED_ATTRIBUTES' type='boolean' "
-        "description='Whether to recursively explore nested objects and "
-        "produce flatten OGR attributes' default='YES'/>"
-        "  <Option name='FID' type='string' description='Field name, with "
-        "integer values, to use as FID' default='ogc_fid'/>"
-        "  <Option name='USE_OGR_METADATA' type='boolean' description='Whether "
-        "to use the _ogr_metadata collection to read layer metadata' "
-        "default='YES'/>"
-        "  <Option name='BULK_INSERT' type='boolean' description='Whether to "
-        "use bulk insert for feature creation' default='YES'/>"
-        "</OpenOptionList>");
-
-    poDriver->SetMetadataItem(
-        GDAL_DMD_CREATIONFIELDDATATYPES,
-        "Integer Integer64 Real String Date DateTime Time IntegerList "
-        "Integer64List RealList StringList Binary");
-    poDriver->SetMetadataItem(GDAL_DMD_CREATIONFIELDDATASUBTYPES, "Boolean");
-    poDriver->SetMetadataItem(GDAL_DCAP_MULTIPLE_VECTOR_LAYERS, "YES");
+    OGRMongoDBv3DriverSetCommonMetadata(poDriver);
 
     poDriver->pfnOpen = OGRMongoDBv3DriverOpen;
-    poDriver->pfnIdentify = OGRMongoDBv3DriverIdentify;
     poDriver->pfnUnloadDriver = OGRMongoDBv3DriverUnload;
 
     GetGDALDriverManager()->RegisterDriver(poDriver);

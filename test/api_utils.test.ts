@@ -1,14 +1,10 @@
 import * as gdal from 'gdal-async'
-import * as chaiAsPromised from 'chai-as-promised'
-import * as chai from 'chai'
-const assert = chai.assert
-chai.use(chaiAsPromised)
+import { assert } from 'chai'
 import * as path from 'path'
 import * as semver from 'semver'
 
 describe('gdal_utils', () => {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  afterEach(global.gc!)
+  afterEach(() => void global.gc!())
 
   describe('translate', () => {
     it('should be equivalent to gdal_translate', () => {
@@ -629,7 +625,8 @@ describe('gdal_utils', () => {
         gdal.vsimem.release(tmpFile)
       }))
     })
-    it('should support progress callbacks', () => {
+    it('should support progress callbacks', function () {
+      this.retries(3)
       const ds = gdal.open(path.resolve(__dirname, 'data', 'sample.tif'))
       const tmpFile = `/vsimem/${String(Math.random()).substring(2)}.tif`
       let calls = 0
@@ -721,7 +718,7 @@ describe('gdal_utils', () => {
       try {
         T2m = gdal.open(path.resolve(__dirname, 'data','AROME_T2m_10.tiff'))
         D2m = gdal.open(path.resolve(__dirname, 'data','truncated.tiff'))
-      } catch (e) {
+      } catch (_e) {
         // Older GDAL versions cannot open the truncated file, so this is
         // considered a successful test too
         this.skip()

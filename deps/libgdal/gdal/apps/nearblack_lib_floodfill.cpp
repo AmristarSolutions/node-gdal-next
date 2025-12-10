@@ -8,23 +8,7 @@
  * ****************************************************************************
  * Copyright (c) 2023, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "gdal_priv.h"
@@ -184,7 +168,8 @@ bool GDALNearblackFloodFillAlg::LoadLine(int iY)
                 if (m_poDstDS->RasterIO(
                         GF_Write, 0, m_nLoadedLine, nXSize, 1, m_abyLine.data(),
                         nXSize, 1, GDT_Byte, m_nDstBands, nullptr, m_nDstBands,
-                        nXSize * m_nDstBands, 1, nullptr) != CE_None)
+                        static_cast<GSpacing>(nXSize) * m_nDstBands, 1,
+                        nullptr) != CE_None)
                 {
                     return false;
                 }
@@ -214,7 +199,8 @@ bool GDALNearblackFloodFillAlg::LoadLine(int iY)
                 if (m_poDstDS->RasterIO(
                         GF_Read, 0, iY, nXSize, 1, m_abyLine.data(), nXSize, 1,
                         GDT_Byte, m_nDstBands, nullptr, m_nDstBands,
-                        nXSize * m_nDstBands, 1, nullptr) != CE_None)
+                        static_cast<GSpacing>(nXSize) * m_nDstBands, 1,
+                        nullptr) != CE_None)
                 {
                     return false;
                 }
@@ -228,7 +214,8 @@ bool GDALNearblackFloodFillAlg::LoadLine(int iY)
                         // m_nSrcBands intended
                         m_nSrcBands,
                         // m_nDstBands intended
-                        nullptr, m_nDstBands, nXSize * m_nDstBands, 1,
+                        nullptr, m_nDstBands,
+                        static_cast<GSpacing>(nXSize) * m_nDstBands, 1,
                         nullptr) != CE_None)
                 {
                     return false;
@@ -464,7 +451,7 @@ bool GDALNearblackFloodFillAlg::Process()
     /* -------------------------------------------------------------------- */
     try
     {
-        m_abyLine.resize(nXSize * m_nDstBands);
+        m_abyLine.resize(static_cast<size_t>(nXSize) * m_nDstBands);
         m_abyLineMustSet.resize(nXSize);
         if (m_bSetMask)
             m_abyMask.resize(nXSize);
@@ -522,7 +509,8 @@ bool GDALNearblackFloodFillAlg::Process()
     }
     else
     {
-        osVisitedDataset = CPLGenerateTempFilename(osVisitedDataset.c_str());
+        osVisitedDataset =
+            CPLGenerateTempFilenameSafe(osVisitedDataset.c_str());
     }
     CPLStringList aosOptions;
     if (strcmp(pszTmpDriver, "GTiff") == 0)

@@ -1,18 +1,19 @@
 {
 	"includes": [
-		"../../common.gypi"
+		"../../common.gypi",
 	],
 	"targets": [
 		{
+			"includes": [ "../../cpp_17.gypi" ],
 			"target_name": "libproj",
 			"type": "static_library",
 			"cflags_cc": ["-Wno-attributes"],
 			"cflags": ["-Wno-attributes"],
 			"sources": [
-				'<!@(python ../glob-files.py "proj/src/*.c")',
-				'<!@(python ../glob-files.py "proj/src/*.cpp")',
-				'<!@(python ../glob-files.py "proj/src/*/*.cpp")',
-				'<!@(python ../glob-files.py "proj/src/*/*/*.cpp")'
+				'<!@(<(python) ../glob-files.py "proj/src/*.c")',
+				'<!@(<(python) ../glob-files.py "proj/src/*.cpp")',
+				'<!@(<(python) ../glob-files.py "proj/src/*/*.cpp")',
+				'<!@(<(python) ../glob-files.py "proj/src/*/*/*.cpp")'
 			],
 			"include_dirs": [
 				"./proj/src",

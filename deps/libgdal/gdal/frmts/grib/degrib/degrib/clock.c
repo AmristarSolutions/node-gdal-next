@@ -729,6 +729,7 @@ sChar Clock_GetTimeZone ()
 #else
       const struct tm *gmTimePtr = gmtime (&ansTime);
 #endif
+      timeZone = 0;
       if (gmTimePtr)
       {
           timeZone = gmTimePtr->tm_hour;
@@ -1954,7 +1955,7 @@ static int Clock_GetWord (char **Start, char **End, char word[30],
    f_integer = 1;
    while ((*ptr != ' ') && (*ptr != ',') && (*ptr != '\0')) {
       if (cnt < 29) {
-         word[cnt] = (char) toupper (*ptr);
+         word[cnt] = (char) toupper ((unsigned char)*ptr);
          cnt++;
       }
       if (*ptr == ':') {
@@ -1972,12 +1973,12 @@ static int Clock_GetWord (char **Start, char **End, char word[30],
             f_integer = 0;
          }
       } else if (*ptr == '.') {
-         if (!isdigit (*(ptr + 1))) {
+         if (!isdigit ((unsigned char)*(ptr + 1))) {
             break;
          } else {
             f_integer = 0;
          }
-      } else if (!isdigit (*ptr)) {
+      } else if (!isdigit ((unsigned char)*ptr)) {
          f_integer = 0;
       }
       ptr++;

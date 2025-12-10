@@ -1,5 +1,4 @@
 /******************************************************************************
- * $Id$
  *
  * Project:  GDAL
  * Purpose:  ECW (ERDAS Wavelet Compression Format) Driver Definitions
@@ -9,23 +8,7 @@
  * Copyright (c) 2001-2011, Frank Warmerdam <warmerdam@pobox.com>
  * Copyright (c) 2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #ifndef GDAL_ECW_H_INCLUDED
@@ -37,10 +20,9 @@
 #include "cpl_conv.h"
 #include "cpl_multiproc.h"
 #include "cpl_vsi.h"
+#include "gdal_asyncreader.h"
 
 #undef NOISY_DEBUG
-
-#ifdef FRMT_ecw
 
 #include "ecwsdk_headers.h"
 
@@ -94,7 +76,7 @@ class JP2UserBox final : public CNCSJP2Box
   public:
     JP2UserBox();
 
-    virtual ~JP2UserBox();
+    ~JP2UserBox() override;
 
 #if ECWSDK_VERSION >= 55
     CNCSError Parse(NCS::SDK::CFileBase &JP2File,
@@ -112,7 +94,7 @@ virtual CNCSError Parse(class CNCSJP2File &JP2File,
 virtual CNCSError UnParse(class CNCSJP2File &JP2File,
                           CNCSJPCIOStream &Stream) override;
 #endif
-    virtual void UpdateXLBox() override;
+    void UpdateXLBox() override;
 
     void SetData(int nDataLength, const unsigned char *pabyDataIn);
 
@@ -120,6 +102,7 @@ virtual CNCSError UnParse(class CNCSJP2File &JP2File,
     {
         return nDataLength;
     }
+
     unsigned char *GetData()
     {
         return pabyData;
@@ -140,41 +123,33 @@ class VSIIOStream final : public CNCSJPCIOStream
     VSIIOStream(VSIIOStream &&) = delete;
     VSIIOStream &operator=(VSIIOStream &&) = delete;
 
-    char *m_Filename;
+    char *m_Filename = nullptr;
 
   public:
-    INT64 startOfJPData;
-    INT64 lengthOfJPData;
-    VSILFILE *fpVSIL;
-    BOOLEAN bWritable;
-    BOOLEAN bSeekable;
-    int nFileViewCount;
+    INT64 startOfJPData = 0;
+    INT64 lengthOfJPData = -1;
+    VSILFILE *fpVSIL = nullptr;
+    BOOLEAN bWritable = false;
+    BOOLEAN bSeekable = false;
+    int nFileViewCount = 0;
 
-    int nCOMState;
-    int nCOMLength;
+    int nCOMState = 0;
+    int nCOMLength = 0;
     GByte abyCOMType[2]{};
 
     /* To fix ‘virtual bool NCS::CIOStream::Read(INT64, void*, UINT32)’ was
      * hidden' with SDK 5 */
     using CNCSJPCIOStream::Read;
 
-    VSIIOStream() : m_Filename(nullptr)
+    VSIIOStream()
     {
-        nFileViewCount = 0;
-        startOfJPData = 0;
-        lengthOfJPData = -1;
-        fpVSIL = nullptr;
-        bWritable = false;
-        bSeekable = false;
         if (CSLTestBoolean(CPLGetConfigOption(
                 "GDAL_ECW_WRITE_COMPRESSION_SOFTWARE", "YES")))
             nCOMState = -1;
-        else
-            nCOMState = 0;
-        nCOMLength = 0;
         abyCOMType[0] = 0;
         abyCOMType[1] = 0;
     }
+
     virtual ~VSIIOStream()
     {
         VSIIOStream::Close();
@@ -240,16 +215,17 @@ class VSIIOStream final : public CNCSJPCIOStream
         CPLString osFilenameUsed = pszFilename;
 
 #if ECWSDK_VERSION < 55
-        CPLString osPath = CPLGetPath(pszFilename);
+        CPLString osPath = CPLGetPathSafe(pszFilename);
         struct stat sStatBuf;
         if (!osPath.empty() && stat(osPath, &sStatBuf) != 0)
         {
-            osFilenameUsed = CPLGenerateTempFilename(nullptr);
+            osFilenameUsed = CPLGenerateTempFilenameSafe(nullptr);
             // try to preserve the extension.
-            if (strlen(CPLGetExtension(pszFilename)) > 0)
+            const auto osExt = CPLGetExtensionSafe(pszFilename);
+            if (!osExt.empty())
             {
                 osFilenameUsed += ".";
-                osFilenameUsed += CPLGetExtension(pszFilename);
+                osFilenameUsed += osExt;
             }
             CPLDebug("ECW",
                      "Using filename '%s' for temporary directory "
@@ -258,7 +234,7 @@ class VSIIOStream final : public CNCSJPCIOStream
         }
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
         if (CSLTestBoolean(CPLGetConfigOption("GDAL_FILENAME_IS_UTF8", "YES")))
         {
             wchar_t *pwszFilename = CPLRecodeToWChar(
@@ -276,7 +252,7 @@ class VSIIOStream final : public CNCSJPCIOStream
         }
     }
 
-    virtual bool NCS_FASTCALL Seek() override
+    bool NCS_FASTCALL Seek() override
     {
         return bSeekable;
     }
@@ -310,12 +286,12 @@ class VSIIOStream final : public CNCSJPCIOStream
         return (success);
     }
 
-    virtual INT64 NCS_FASTCALL Tell() override
+    INT64 NCS_FASTCALL Tell() override
     {
         return VSIFTellL(fpVSIL) - startOfJPData;
     }
 
-    virtual INT64 NCS_FASTCALL Size() override
+    INT64 NCS_FASTCALL Size() override
     {
         if (lengthOfJPData != -1)
             return lengthOfJPData;
@@ -336,7 +312,7 @@ class VSIIOStream final : public CNCSJPCIOStream
 
 #if ECWSDK_VERSION >= 40
     /* New, and needed, in ECW SDK 4 */
-    virtual bool Read(INT64 offset, void *buffer, UINT32 count) override
+    bool Read(INT64 offset, void *buffer, UINT32 count) override
     {
 #ifdef DEBUG_VERBOSE
         CPLDebug("ECW", "VSIIOStream::Read(" CPL_FRMT_GIB ",%u)",
@@ -352,7 +328,7 @@ class VSIIOStream final : public CNCSJPCIOStream
     }
 #endif
 
-    virtual bool NCS_FASTCALL Read(void *buffer, UINT32 count) override
+    bool NCS_FASTCALL Read(void *buffer, UINT32 count) override
     {
 #ifdef DEBUG_VERBOSE
         CPLDebug("ECW", "VSIIOStream::Read(%u)", count);
@@ -373,7 +349,7 @@ class VSIIOStream final : public CNCSJPCIOStream
         return true;
     }
 
-    virtual bool NCS_FASTCALL Write(void *buffer, UINT32 count) override
+    bool NCS_FASTCALL Write(void *buffer, UINT32 count) override
     {
         if (count == 0)
             return true;
@@ -467,7 +443,7 @@ class ECWAsyncReader final : public GDALAsyncReader
 
   public:
     ECWAsyncReader();
-    virtual ~ECWAsyncReader();
+    ~ECWAsyncReader() override;
     virtual GDALAsyncStatusType
     GetNextUpdatedRegion(double dfTimeout, int *pnXBufOff, int *pnYBufOff,
                          int *pnXBufSize, int *pnYBufSize) override;
@@ -542,7 +518,7 @@ class CPL_DLL ECWDataset final : public GDALJP2AbstractDataset
     void CleanupWindow();
     CPLErr RunDeferredAdviseRead();
     int TryWinRasterIO(GDALRWFlag, int, int, int, int, GByte *, int, int,
-                       GDALDataType, int, int *, GSpacing nPixelSpace,
+                       GDALDataType, int, const int *, GSpacing nPixelSpace,
                        GSpacing nLineSpace, GSpacing nBandSpace,
                        GDALRasterIOExtraArg *psExtraArg);
     CPLErr LoadNextLine();
@@ -596,13 +572,11 @@ class CPL_DLL ECWDataset final : public GDALJP2AbstractDataset
                              GDALRasterIOExtraArg *psExtraArg);
 
   public:
-    ECWDataset(int bIsJPEG2000);
-    ~ECWDataset();
+    explicit ECWDataset(int bIsJPEG2000);
+    ~ECWDataset() override;
 
     static GDALDataset *Open(GDALOpenInfo *, int bIsJPEG2000);
-    static int IdentifyJPEG2000(GDALOpenInfo *poOpenInfo);
     static GDALDataset *OpenJPEG2000(GDALOpenInfo *);
-    static int IdentifyECW(GDALOpenInfo *poOpenInfo);
     static GDALDataset *OpenECW(GDALOpenInfo *);
 
     void SetPreventCopyingSomeMetadata(int b)
@@ -610,28 +584,28 @@ class CPL_DLL ECWDataset final : public GDALJP2AbstractDataset
         bPreventCopyingSomeMetadata = b;
     }
 
-    virtual CPLErr IRasterIO(GDALRWFlag, int, int, int, int, void *, int, int,
-                             GDALDataType, int, int *, GSpacing nPixelSpace,
-                             GSpacing nLineSpace, GSpacing nBandSpace,
-                             GDALRasterIOExtraArg *psExtraArg) override;
+    CPLErr IRasterIO(GDALRWFlag, int, int, int, int, void *, int, int,
+                     GDALDataType, int, BANDMAP_TYPE, GSpacing nPixelSpace,
+                     GSpacing nLineSpace, GSpacing nBandSpace,
+                     GDALRasterIOExtraArg *psExtraArg) override;
 
-    virtual char **GetMetadataDomainList() override;
+    char **GetMetadataDomainList() override;
     virtual const char *GetMetadataItem(const char *pszName,
                                         const char *pszDomain = "") override;
-    virtual char **GetMetadata(const char *pszDomain = "") override;
+    char **GetMetadata(const char *pszDomain = "") override;
 
-    virtual CPLErr SetGeoTransform(double *padfGeoTransform) override;
+    CPLErr SetGeoTransform(const GDALGeoTransform &gt) override;
     CPLErr SetSpatialRef(const OGRSpatialReference *poSRS) override;
 
-    virtual CPLErr SetMetadataItem(const char *pszName, const char *pszValue,
-                                   const char *pszDomain = "") override;
-    virtual CPLErr SetMetadata(char **papszMetadata,
-                               const char *pszDomain = "") override;
+    CPLErr SetMetadataItem(const char *pszName, const char *pszValue,
+                           const char *pszDomain = "") override;
+    CPLErr SetMetadata(char **papszMetadata,
+                       const char *pszDomain = "") override;
 
-    virtual CPLErr AdviseRead(int nXOff, int nYOff, int nXSize, int nYSize,
-                              int nBufXSize, int nBufYSize, GDALDataType eDT,
-                              int nBandCount, int *panBandList,
-                              char **papszOptions) override;
+    CPLErr AdviseRead(int nXOff, int nYOff, int nXSize, int nYSize,
+                      int nBufXSize, int nBufYSize, GDALDataType eDT,
+                      int nBandCount, int *panBandList,
+                      char **papszOptions) override;
 
     // progressive methods
 #if ECWSDK_VERSION >= 40
@@ -642,7 +616,7 @@ class CPL_DLL ECWDataset final : public GDALJP2AbstractDataset
                      int nLineSpace, int nBandSpace,
                      char **papszOptions) override;
 
-    virtual void EndAsyncReader(GDALAsyncReader *) override;
+    void EndAsyncReader(GDALAsyncReader *) override;
 #endif /* ECWSDK_VERSION > 40 */
 #if ECWSDK_VERSION >= 50
     int GetFormatVersion() const
@@ -686,51 +660,52 @@ class ECWRasterBand final : public GDALPamRasterBand
                         GDALRasterIOExtraArg *psExtraArg);
     // #endif
 
-    virtual CPLErr IRasterIO(GDALRWFlag, int, int, int, int, void *, int, int,
-                             GDALDataType, GSpacing nPixelSpace,
-                             GSpacing nLineSpace,
-                             GDALRasterIOExtraArg *psExtraArg) override;
+    CPLErr IRasterIO(GDALRWFlag, int, int, int, int, void *, int, int,
+                     GDALDataType, GSpacing nPixelSpace, GSpacing nLineSpace,
+                     GDALRasterIOExtraArg *psExtraArg) override;
 
   public:
     ECWRasterBand(ECWDataset *, int, int iOverview, char **papszOpenOptions);
-    ~ECWRasterBand();
+    ~ECWRasterBand() override;
 
-    virtual CPLErr IReadBlock(int, int, void *) override;
-    virtual int HasArbitraryOverviews() override
+    CPLErr IReadBlock(int, int, void *) override;
+
+    int HasArbitraryOverviews() override
     {
         return apoOverviews.empty();
     }
-    virtual int GetOverviewCount() override
+
+    int GetOverviewCount() override
     {
         return (int)apoOverviews.size();
     }
-    virtual GDALRasterBand *GetOverview(int) override;
 
-    virtual GDALColorInterp GetColorInterpretation() override;
-    virtual CPLErr SetColorInterpretation(GDALColorInterp) override;
+    GDALRasterBand *GetOverview(int) override;
 
-    virtual CPLErr AdviseRead(int nXOff, int nYOff, int nXSize, int nYSize,
-                              int nBufXSize, int nBufYSize, GDALDataType eDT,
-                              char **papszOptions) override;
+    GDALColorInterp GetColorInterpretation() override;
+    CPLErr SetColorInterpretation(GDALColorInterp) override;
+
+    CPLErr AdviseRead(int nXOff, int nYOff, int nXSize, int nYSize,
+                      int nBufXSize, int nBufYSize, GDALDataType eDT,
+                      char **papszOptions) override;
 #if ECWSDK_VERSION >= 50
     void GetBandIndexAndCountForStatistics(int &bandIndex,
                                            int &bandCount) const;
-    virtual CPLErr GetDefaultHistogram(double *pdfMin, double *pdfMax,
-                                       int *pnBuckets, GUIntBig **ppanHistogram,
-                                       int bForce, GDALProgressFunc,
-                                       void *pProgressData) override;
+    CPLErr GetDefaultHistogram(double *pdfMin, double *pdfMax, int *pnBuckets,
+                               GUIntBig **ppanHistogram, int bForce,
+                               GDALProgressFunc, void *pProgressData) override;
     virtual CPLErr SetDefaultHistogram(double dfMin, double dfMax, int nBuckets,
                                        GUIntBig *panHistogram) override;
-    virtual double GetMinimum(int *pbSuccess) override;
-    virtual double GetMaximum(int *pbSuccess) override;
+    double GetMinimum(int *pbSuccess) override;
+    double GetMaximum(int *pbSuccess) override;
     virtual CPLErr GetStatistics(int bApproxOK, int bForce, double *pdfMin,
                                  double *pdfMax, double *pdfMean,
                                  double *padfStdDev) override;
     virtual CPLErr SetStatistics(double dfMin, double dfMax, double dfMean,
                                  double dfStdDev) override;
 
-    virtual CPLErr SetMetadataItem(const char *pszName, const char *pszValue,
-                                   const char *pszDomain = "") override;
+    CPLErr SetMetadataItem(const char *pszName, const char *pszValue,
+                           const char *pszDomain = "") override;
 #endif
 };
 
@@ -740,7 +715,5 @@ int ECWTranslateFromWKT(const OGRSpatialReference *poSRS, char *pszProjection,
 
 CellSizeUnits ECWTranslateToCellSizeUnits(const char *pszUnits);
 const char *ECWTranslateFromCellSizeUnits(CellSizeUnits eUnits);
-
-#endif /* def FRMT_ecw */
 
 #endif /* ndef GDAL_ECW_H_INCLUDED */

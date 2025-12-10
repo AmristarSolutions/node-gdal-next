@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2002, Frank Warmerdam <warmerdam@pobox.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_oci.h"
@@ -52,16 +36,12 @@ constexpr int anEPSGOracleMapping[] = {
 OGROCIDataSource::OGROCIDataSource()
 
 {
-    pszName = nullptr;
     pszDBName = nullptr;
     papoLayers = nullptr;
     nLayers = 0;
     bDSUpdate = FALSE;
     bNoLogging = FALSE;
     poSession = nullptr;
-    papoSRS = nullptr;
-    panSRID = nullptr;
-    nKnownSRID = 0;
 }
 
 /************************************************************************/
@@ -73,20 +53,12 @@ OGROCIDataSource::~OGROCIDataSource()
 {
     int i;
 
-    CPLFree(pszName);
     CPLFree(pszDBName);
 
     for (i = 0; i < nLayers; i++)
         delete papoLayers[i];
 
     CPLFree(papoLayers);
-
-    for (i = 0; i < nKnownSRID; i++)
-    {
-        papoSRS[i]->Release();
-    }
-    CPLFree(papoSRS);
-    CPLFree(panSRID);
 
     if (poSession != nullptr)
         delete poSession;
@@ -208,8 +180,6 @@ int OGROCIDataSource::Open(const char *pszNewName, char **papszOpenOptionsIn,
         oValidateStmt.Execute(oValidateCmd.GetString());
     }
 
-    pszName = CPLStrdup(pszNewName);
-
     bDSUpdate = bUpdate;
 
     /* -------------------------------------------------------------------- */
@@ -321,7 +291,8 @@ void OGROCIDataSource::ValidateLayer(const char *pszLayerName)
     /* -------------------------------------------------------------------- */
     /*      Verify we have an FID and geometry column for this table.       */
     /* -------------------------------------------------------------------- */
-    OGROCITableLayer *poLayer = (OGROCITableLayer *)papoLayers[iLayer];
+    OGROCITableLayer *poLayer =
+        cpl::down_cast<OGROCITableLayer *>(papoLayers[iLayer]);
 
     if (strlen(poLayer->GetFIDColumn()) == 0)
     {
@@ -484,12 +455,16 @@ void OGROCIDataSource::TruncateLayer(const char *pszLayerName)
 /*                           ICreateLayer()                             */
 /************************************************************************/
 
-OGRLayer *OGROCIDataSource::ICreateLayer(const char *pszLayerName,
-                                         const OGRSpatialReference *poSRS,
-                                         OGRwkbGeometryType eType,
-                                         char **papszOptions)
+OGRLayer *
+OGROCIDataSource::ICreateLayer(const char *pszLayerName,
+                               const OGRGeomFieldDefn *poGeomFieldDefn,
+                               CSLConstList papszOptions)
 
 {
+    const auto eType = poGeomFieldDefn ? poGeomFieldDefn->GetType() : wkbNone;
+    const auto poSRS =
+        poGeomFieldDefn ? poGeomFieldDefn->GetSpatialRef() : nullptr;
+
     char *pszSafeLayerName = CPLStrdup(pszLayerName);
 
     poSession->CleanName(pszSafeLayerName);
@@ -669,7 +644,7 @@ OGRLayer *OGROCIDataSource::ICreateLayer(const char *pszLayerName,
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGROCIDataSource::TestCapability(const char *pszCap)
+int OGROCIDataSource::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, ODsCCreateLayer) && bDSUpdate)
@@ -688,7 +663,7 @@ int OGROCIDataSource::TestCapability(const char *pszCap)
 /*                              GetLayer()                              */
 /************************************************************************/
 
-OGRLayer *OGROCIDataSource::GetLayer(int iLayer)
+const OGRLayer *OGROCIDataSource::GetLayer(int iLayer) const
 
 {
     if (iLayer < 0 || iLayer >= nLayers)
@@ -710,8 +685,8 @@ OGRLayer *OGROCIDataSource::ExecuteSQL(const char *pszSQLCommand,
     /*      Use generic implementation for recognized dialects              */
     /* -------------------------------------------------------------------- */
     if (IsGenericSQLDialect(pszDialect))
-        return OGRDataSource::ExecuteSQL(pszSQLCommand, poSpatialFilter,
-                                         pszDialect);
+        return GDALDataset::ExecuteSQL(pszSQLCommand, poSpatialFilter,
+                                       pszDialect);
 
     /* -------------------------------------------------------------------- */
     /*      Ensure any pending stuff is flushed to the database.            */
@@ -801,12 +776,10 @@ OGRSpatialReference *OGROCIDataSource::FetchSRS(int nId)
     /* -------------------------------------------------------------------- */
     /*      First, we look through our SRID cache, is it there?             */
     /* -------------------------------------------------------------------- */
-    int i;
-
-    for (i = 0; i < nKnownSRID; i++)
+    auto oIter = m_oSRSCache.find(nId);
+    if (oIter != m_oSRSCache.end())
     {
-        if (panSRID[i] == nId)
-            return papoSRS[i];
+        return oIter->second.get();
     }
 
     /* -------------------------------------------------------------------- */
@@ -830,11 +803,11 @@ OGRSpatialReference *OGROCIDataSource::FetchSRS(int nId)
     /* -------------------------------------------------------------------- */
     /*      Turn into a spatial reference.                                  */
     /* -------------------------------------------------------------------- */
-    OGRSpatialReference *poSRS = new OGRSpatialReference();
+    std::unique_ptr<OGRSpatialReference, OGRSpatialReferenceReleaser> poSRS(
+        new OGRSpatialReference());
     poSRS->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
     if (poSRS->importFromWkt(papszResult[0]) != OGRERR_NONE)
     {
-        delete poSRS;
         return nullptr;
     }
 
@@ -846,17 +819,16 @@ OGRSpatialReference *OGROCIDataSource::FetchSRS(int nId)
     if (nId < LARGEST_EPSG_CRS_CODE && papszResult[1] != nullptr &&
         atoi(papszResult[1]) == nId)
     {
-        CPLErrorHandlerPusher oErrorHandler(CPLQuietErrorHandler);
-        CPLErrorStateBackuper oErrorStateBackuper;
+        CPLErrorStateBackuper oErrorStateBackuper(CPLQuietErrorHandler);
         OGRSpatialReference oSRS_EPSG;
         oSRS_EPSG.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
         const char *const apszOptions[] = {
             "IGNORE_DATA_AXIS_TO_SRS_AXIS_MAPPING=YES", nullptr};
         if (oSRS_EPSG.importFromEPSG(nId) == OGRERR_NONE &&
-            oSRS_EPSG.IsSame(poSRS, apszOptions))
+            oSRS_EPSG.IsSame(poSRS.get(), apszOptions))
         {
             *poSRS = oSRS_EPSG;
-            return poSRS;
+            return poSRS.release();
         }
     }
 
@@ -865,7 +837,7 @@ OGRSpatialReference *OGROCIDataSource::FetchSRS(int nId)
     /*      authority.                                                      */
     /* -------------------------------------------------------------------- */
     int bGotEPSGMapping = FALSE;
-    for (i = 0; anEPSGOracleMapping[i] != 0; i += 2)
+    for (int i = 0; anEPSGOracleMapping[i] != 0; i += 2)
     {
         if (anEPSGOracleMapping[i] == nId)
         {
@@ -890,15 +862,8 @@ OGRSpatialReference *OGROCIDataSource::FetchSRS(int nId)
     /* -------------------------------------------------------------------- */
     /*      Add to the cache.                                               */
     /* -------------------------------------------------------------------- */
-    panSRID = (int *)CPLRealloc(panSRID, sizeof(int) * (nKnownSRID + 1));
-    papoSRS = (OGRSpatialReference **)CPLRealloc(papoSRS, sizeof(void *) *
-                                                              (nKnownSRID + 1));
-    panSRID[nKnownSRID] = nId;
-    papoSRS[nKnownSRID] = poSRS;
-
-    nKnownSRID++;
-
-    return poSRS;
+    oIter = m_oSRSCache.emplace(nId, std::move(poSRS)).first;
+    return oIter->second.get();
 }
 
 /************************************************************************/

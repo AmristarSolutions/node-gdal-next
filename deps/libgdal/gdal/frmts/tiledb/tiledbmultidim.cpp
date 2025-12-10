@@ -7,28 +7,10 @@
  ******************************************************************************
  * Copyright (c) 2023, TileDB, Inc
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "tiledbmultidim.h"
-
-#ifdef HAS_TILEDB_MULTIDIM
 
 /************************************************************************/
 /*              TileDBSingleArrayGroup::SanitizeNameForPath()           */
@@ -41,7 +23,8 @@ std::string TileDBSharedResource::SanitizeNameForPath(const std::string &osName)
     // Reserved characters on Windows
     for (char ch : {'<', '>', ':', '"', '/', '\\', '|', '?', '*'})
         osSanitized.replaceAll(ch, '_');
-    return osSanitized;
+    std::string osRet = std::move(osSanitized);
+    return osRet;
 }
 
 /************************************************************************/
@@ -60,9 +43,9 @@ std::shared_ptr<GDALGroup> TileDBArrayGroup::Create(
     std::vector<std::shared_ptr<GDALMDArray>> apoArrays;
     if (nAttributes == 1)
     {
-        auto poArray =
-            TileDBArray::OpenFromDisk(poSharedResource, "/", osBaseName,
-                                      std::string(), osArrayPath, nullptr);
+        auto poArray = TileDBArray::OpenFromDisk(poSharedResource, nullptr, "/",
+                                                 osBaseName, std::string(),
+                                                 osArrayPath, nullptr);
         if (!poArray)
             return nullptr;
         apoArrays.emplace_back(poArray);
@@ -72,7 +55,7 @@ std::shared_ptr<GDALGroup> TileDBArrayGroup::Create(
         for (uint32_t i = 0; i < nAttributes; ++i)
         {
             auto poArray = TileDBArray::OpenFromDisk(
-                poSharedResource, "/",
+                poSharedResource, nullptr, "/",
                 osBaseName + "." + schema.attribute(i).name(),
                 schema.attribute(i).name(), osArrayPath, nullptr);
             if (!poArray)
@@ -213,4 +196,20 @@ TileDBDataset::CreateMultiDimensional(const char *pszFilename,
     return poDS;
 }
 
-#endif  // HAS_TILEDB_MULTIDIM
+/************************************************************************/
+/*                 TileDBDimension::GetIndexingVariable()               */
+/************************************************************************/
+
+std::shared_ptr<GDALMDArray> TileDBDimension::GetIndexingVariable() const
+{
+    return m_poIndexingVariable;
+}
+
+/************************************************************************/
+/*                 TileDBMultiDimDataset::GetRootGroup()                */
+/************************************************************************/
+
+std::shared_ptr<GDALGroup> TileDBMultiDimDataset::GetRootGroup() const
+{
+    return m_poRG;
+}

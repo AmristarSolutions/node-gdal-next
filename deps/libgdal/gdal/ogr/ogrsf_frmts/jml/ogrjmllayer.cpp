@@ -6,43 +6,27 @@
  ******************************************************************************
  * Copyright (c) 2014, Even Rouault <even dot rouault at spatialys dot com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "cpl_conv.h"
 #include "ogr_jml.h"
 #include "ogr_p.h"
 
-constexpr int PARSER_BUF_SIZE = 8192;
-
 #ifdef HAVE_EXPAT
+
+constexpr int PARSER_BUF_SIZE = 8192;
 
 /************************************************************************/
 /*                              OGRJMLLayer()                           */
 /************************************************************************/
 
-OGRJMLLayer::OGRJMLLayer(const char *pszLayerName, OGRJMLDataset * /* poDSIn */,
+OGRJMLLayer::OGRJMLLayer(const char *pszLayerName, OGRJMLDataset *poDSIn,
                          VSILFILE *fpIn)
-    : poFeatureDefn(new OGRFeatureDefn(pszLayerName)), nNextFID(0), fp(fpIn),
-      bHasReadSchema(false), oParser(nullptr), currentDepth(0),
-      bStopParsing(false), nWithoutEventCounter(0), nDataHandlerCounter(0),
-      bAccumulateElementValue(false),
+    : m_poDS(poDSIn), poFeatureDefn(new OGRFeatureDefn(pszLayerName)),
+      nNextFID(0), fp(fpIn), bHasReadSchema(false), oParser(nullptr),
+      currentDepth(0), bStopParsing(false), nWithoutEventCounter(0),
+      nDataHandlerCounter(0), bAccumulateElementValue(false),
       pszElementValue(static_cast<char *>(CPLCalloc(1024, 1))),
       nElementValueLen(0), nElementValueAlloc(1024), poFeature(nullptr),
       ppoFeatureTab(nullptr), nFeatureTabLength(0), nFeatureTabIndex(0),
@@ -81,10 +65,10 @@ OGRJMLLayer::~OGRJMLLayer()
 /*                            GetLayerDefn()                            */
 /************************************************************************/
 
-OGRFeatureDefn *OGRJMLLayer::GetLayerDefn()
+const OGRFeatureDefn *OGRJMLLayer::GetLayerDefn() const
 {
     if (!bHasReadSchema)
-        LoadSchema();
+        const_cast<OGRJMLLayer *>(this)->LoadSchema();
 
     return poFeatureDefn;
 }
@@ -115,6 +99,7 @@ void OGRJMLLayer::ResetReading()
     nNextFID = 0;
 
     VSIFSeekL(fp, 0, SEEK_SET);
+    VSIFClearErrL(fp);
     if (oParser)
         XML_ParserFree(oParser);
 
@@ -433,7 +418,7 @@ OGRFeature *OGRJMLLayer::GetNextFeature()
         return ppoFeatureTab[nFeatureTabIndex++];
     }
 
-    if (VSIFEofL(fp))
+    if (VSIFEofL(fp) || VSIFErrorL(fp))
         return nullptr;
 
     std::vector<char> aBuf(PARSER_BUF_SIZE);
@@ -449,7 +434,7 @@ OGRFeature *OGRJMLLayer::GetNextFeature()
         nDataHandlerCounter = 0;
         unsigned int nLen =
             (unsigned int)VSIFReadL(aBuf.data(), 1, aBuf.size(), fp);
-        nDone = VSIFEofL(fp);
+        nDone = (nLen < aBuf.size());
         if (XML_Parse(oParser, aBuf.data(), nLen, nDone) == XML_STATUS_ERROR)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
@@ -515,7 +500,7 @@ void OGRJMLLayer::LoadSchema()
         nDataHandlerCounter = 0;
         const unsigned int nLen = static_cast<unsigned int>(
             VSIFReadL(aBuf.data(), 1, aBuf.size(), fp));
-        nDone = VSIFEofL(fp);
+        nDone = (nLen < aBuf.size());
         if (XML_Parse(oParser, aBuf.data(), nLen, nDone) == XML_STATUS_ERROR)
         {
             CPLError(CE_Failure, CPLE_AppDefined,
@@ -822,7 +807,7 @@ void OGRJMLLayer::endElementLoadSchemaCbk(const char * /* pszName */)
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRJMLLayer::TestCapability(const char *pszCap)
+int OGRJMLLayer::TestCapability(const char *pszCap) const
 
 {
     if (EQUAL(pszCap, OLCStringsAsUTF8))

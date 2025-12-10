@@ -7,23 +7,7 @@
  ******************************************************************************
  * Copyright (c) 2012-2013, Even Rouault <even dot rouault at spatialys.com>
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_sqlite.h"
@@ -116,7 +100,7 @@ static CPLString OGR2SQLITEExtractUnquotedString(const char **ppszSQLCommand)
                     chQuoteChar = *pszSQLCommand;
                 }
                 else if (nParenthesisLevel == 0 &&
-                         (isspace((int)*pszSQLCommand) ||
+                         (isspace(static_cast<unsigned char>(*pszSQLCommand)) ||
                           *pszSQLCommand == '.' || *pszSQLCommand == ','))
                 {
                     break;
@@ -141,11 +125,11 @@ static CPLString OGR2SQLITEExtractUnquotedString(const char **ppszSQLCommand)
 
 static LayerDesc OGR2SQLITEExtractLayerDesc(const char **ppszSQLCommand)
 {
-    CPLString osStr;
+    std::string osStr;
     const char *pszSQLCommand = *ppszSQLCommand;
     LayerDesc oLayerDesc;
 
-    while (isspace((int)*pszSQLCommand))
+    while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
         pszSQLCommand++;
 
     const char *pszOriginalStrStart = pszSQLCommand;
@@ -162,7 +146,7 @@ static LayerDesc OGR2SQLITEExtractLayerDesc(const char **ppszSQLCommand)
     }
     else
     {
-        oLayerDesc.osLayerName = osStr;
+        oLayerDesc.osLayerName = std::move(osStr);
     }
 
     oLayerDesc.osOriginalStr.resize(pszSQLCommand - pszOriginalStrStart);
@@ -200,9 +184,9 @@ static void OGR2SQLITEAddLayer(const char *&pszStart, int &nNum,
         {
             oLayerDesc.osSubstitutedName =
                 CPLString().Printf("_OGR_%d", nNum++);
-            osModifiedSQL += "\"";
+            osModifiedSQL += "'";
             osModifiedSQL += oLayerDesc.osSubstitutedName;
-            osModifiedSQL += "\"";
+            osModifiedSQL += "'";
         }
         else
         {
@@ -212,7 +196,7 @@ static void OGR2SQLITEAddLayer(const char *&pszStart, int &nNum,
     }
     if (bInsert)
     {
-        oSet.insert(oLayerDesc);
+        oSet.insert(std::move(oLayerDesc));
     }
     pszStart = pszSQLCommand;
 }
@@ -221,14 +205,12 @@ static void OGR2SQLITEAddLayer(const char *&pszStart, int &nNum,
 /*                         StartsAsSQLITEKeyWord()                      */
 /************************************************************************/
 
-static const char *const apszKeywords[] = {
-    "WHERE", "GROUP", "ORDER", "JOIN", "UNION", "INTERSECT", "EXCEPT", "LIMIT"};
-
 static int StartsAsSQLITEKeyWord(const char *pszStr)
 {
-    for (int i = 0; i < (int)(sizeof(apszKeywords) / sizeof(char *)); i++)
+    for (const char *pszKeyword : {"WHERE", "GROUP", "ORDER", "JOIN", "UNION",
+                                   "INTERSECT", "EXCEPT", "LIMIT"})
     {
-        if (EQUALN(pszStr, apszKeywords[i], strlen(apszKeywords[i])))
+        if (STARTS_WITH_CI(pszStr, pszKeyword))
             return TRUE;
     }
     return FALSE;
@@ -291,7 +273,7 @@ static void OGR2SQLITEGetPotentialLayerNamesInternal(
             pszSQLCommand++;
             nParenthesisLevel++;
 
-            while (isspace((int)*pszSQLCommand))
+            while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                 pszSQLCommand++;
 
             OGR2SQLITEAddLayer(pszStart, nNum, pszSQLCommand, oSetLayers,
@@ -301,18 +283,19 @@ static void OGR2SQLITEGetPotentialLayerNamesInternal(
         else if (bLookforFTableName &&
                  STARTS_WITH_CI(pszSQLCommand, "f_table_name") &&
                  (pszSQLCommand[strlen("f_table_name")] == '=' ||
-                  isspace((int)pszSQLCommand[strlen("f_table_name")])))
+                  isspace(static_cast<unsigned char>(
+                      pszSQLCommand[strlen("f_table_name")]))))
         {
             pszSQLCommand += strlen("f_table_name");
 
-            while (isspace((int)*pszSQLCommand))
+            while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                 pszSQLCommand++;
 
             if (*pszSQLCommand == '=')
             {
                 pszSQLCommand++;
 
-                while (isspace((int)*pszSQLCommand))
+                while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                     pszSQLCommand++;
 
                 oSetSpatialIndex.insert(
@@ -323,15 +306,17 @@ static void OGR2SQLITEGetPotentialLayerNamesInternal(
         }
 
         else if (STARTS_WITH_CI(pszSQLCommand, "FROM") &&
-                 isspace(pszSQLCommand[strlen("FROM")]))
+                 isspace(
+                     static_cast<unsigned char>(pszSQLCommand[strlen("FROM")])))
         {
             pszSQLCommand += strlen("FROM") + 1;
 
-            while (isspace((int)*pszSQLCommand))
+            while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                 pszSQLCommand++;
 
             if (STARTS_WITH_CI(pszSQLCommand, "SpatialIndex") &&
-                isspace((int)pszSQLCommand[strlen("SpatialIndex")]))
+                isspace(static_cast<unsigned char>(
+                    pszSQLCommand[strlen("SpatialIndex")])))
             {
                 pszSQLCommand += strlen("SpatialIndex") + 1;
 
@@ -360,16 +345,17 @@ static void OGR2SQLITEGetPotentialLayerNamesInternal(
 
             while (*pszSQLCommand != '\0')
             {
-                if (isspace((int)*pszSQLCommand))
+                if (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                 {
                     pszSQLCommand++;
-                    while (isspace((int)*pszSQLCommand))
+                    while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                         pszSQLCommand++;
 
                     if (STARTS_WITH_CI(pszSQLCommand, "AS"))
                     {
                         pszSQLCommand += 2;
-                        while (isspace((int)*pszSQLCommand))
+                        while (
+                            isspace(static_cast<unsigned char>(*pszSQLCommand)))
                             pszSQLCommand++;
                     }
 
@@ -384,7 +370,7 @@ static void OGR2SQLITEGetPotentialLayerNamesInternal(
                 else if (*pszSQLCommand == ',')
                 {
                     pszSQLCommand++;
-                    while (isspace((int)*pszSQLCommand))
+                    while (isspace(static_cast<unsigned char>(*pszSQLCommand)))
                         pszSQLCommand++;
 
                     if (*pszSQLCommand == '(')
@@ -410,21 +396,24 @@ static void OGR2SQLITEGetPotentialLayerNamesInternal(
             }
         }
         else if (STARTS_WITH_CI(pszSQLCommand, "JOIN") &&
-                 isspace(pszSQLCommand[strlen("JOIN")]))
+                 isspace(
+                     static_cast<unsigned char>(pszSQLCommand[strlen("JOIN")])))
         {
             pszSQLCommand += strlen("JOIN") + 1;
             OGR2SQLITEAddLayer(pszStart, nNum, pszSQLCommand, oSetLayers,
                                osModifiedSQL);
         }
         else if (STARTS_WITH_CI(pszSQLCommand, "INTO") &&
-                 isspace(pszSQLCommand[strlen("INTO")]))
+                 isspace(
+                     static_cast<unsigned char>(pszSQLCommand[strlen("INTO")])))
         {
             pszSQLCommand += strlen("INTO") + 1;
             OGR2SQLITEAddLayer(pszStart, nNum, pszSQLCommand, oSetLayers,
                                osModifiedSQL);
         }
         else if (STARTS_WITH_CI(pszSQLCommand, "UPDATE") &&
-                 isspace(pszSQLCommand[strlen("UPDATE")]))
+                 isspace(static_cast<unsigned char>(
+                     pszSQLCommand[strlen("UPDATE")])))
         {
             pszSQLCommand += strlen("UPDATE") + 1;
             OGR2SQLITEAddLayer(pszStart, nNum, pszSQLCommand, oSetLayers,
@@ -486,14 +475,20 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *, const char *, OGRGeometry *,
 
 class OGRSQLiteExecuteSQLLayer final : public OGRSQLiteSelectLayer
 {
-    char *pszTmpDBName;
+    char *m_pszTmpDBName = nullptr;
+    bool m_bStringsAsUTF8 = false;
+
+    CPL_DISALLOW_COPY_ASSIGN(OGRSQLiteExecuteSQLLayer)
 
   public:
     OGRSQLiteExecuteSQLLayer(char *pszTmpDBName, OGRSQLiteDataSource *poDS,
                              const CPLString &osSQL, sqlite3_stmt *hStmt,
                              bool bUseStatementForGetNextFeature,
-                             bool bEmptyLayer, bool bCanReopenBaseDS);
-    virtual ~OGRSQLiteExecuteSQLLayer();
+                             bool bEmptyLayer, bool bCanReopenBaseDS,
+                             bool bStringsAsUTF8);
+    ~OGRSQLiteExecuteSQLLayer() override;
+
+    int TestCapability(const char *pszCap) const override;
 };
 
 /************************************************************************/
@@ -503,11 +498,11 @@ class OGRSQLiteExecuteSQLLayer final : public OGRSQLiteSelectLayer
 OGRSQLiteExecuteSQLLayer::OGRSQLiteExecuteSQLLayer(
     char *pszTmpDBNameIn, OGRSQLiteDataSource *poDSIn, const CPLString &osSQL,
     sqlite3_stmt *hStmtIn, bool bUseStatementForGetNextFeature,
-    bool bEmptyLayer, bool bCanReopenBaseDS)
+    bool bEmptyLayer, bool bCanReopenBaseDS, bool bStringsAsUTF8)
     : OGRSQLiteSelectLayer(poDSIn, osSQL, hStmtIn,
                            bUseStatementForGetNextFeature, bEmptyLayer, true,
                            bCanReopenBaseDS),
-      pszTmpDBName(pszTmpDBNameIn)
+      m_pszTmpDBName(pszTmpDBNameIn), m_bStringsAsUTF8(bStringsAsUTF8)
 {
 }
 
@@ -524,8 +519,19 @@ OGRSQLiteExecuteSQLLayer::~OGRSQLiteExecuteSQLLayer()
     Finalize();
 
     delete m_poDS;
-    VSIUnlink(pszTmpDBName);
-    CPLFree(pszTmpDBName);
+    VSIUnlink(m_pszTmpDBName);
+    CPLFree(m_pszTmpDBName);
+}
+
+/************************************************************************/
+/*                           TestCapability()                           */
+/************************************************************************/
+
+int OGRSQLiteExecuteSQLLayer::TestCapability(const char *pszCap) const
+{
+    if (EQUAL(pszCap, OLCStringsAsUTF8))
+        return m_bStringsAsUTF8;
+    return OGRSQLiteSelectLayer::TestCapability(pszCap);
 }
 
 /************************************************************************/
@@ -543,7 +549,7 @@ static void OGR2SQLITE_IgnoreAllFieldsExceptGeometry(OGRLayer *poLayer)
         papszIgnored = CSLAddString(
             papszIgnored, poFeatureDefn->GetFieldDefn(i)->GetNameRef());
     }
-    poLayer->SetIgnoredFields((const char **)papszIgnored);
+    poLayer->SetIgnoredFields(const_cast<const char **>(papszIgnored));
     CSLDestroy(papszIgnored);
 }
 #endif
@@ -601,7 +607,7 @@ static int OGR2SQLITEDealWithSpatialColumn(
                      "coord_dimension, srid) "
                      "VALUES ('%s','%s','SpatiaLite',%d,%d,%d)",
                      pszLayerNameEscaped, pszGeomColEscaped,
-                     (int)wkbFlatten(poLayer->GetGeomType()),
+                     static_cast<int>(wkbFlatten(poLayer->GetGeomType())),
                      wkbHasZ(poLayer->GetGeomType()) ? 3 : 2, nSRSId);
     }
 #ifdef HAVE_SPATIALITE
@@ -645,9 +651,10 @@ static int OGR2SQLITEDealWithSpatialColumn(
 
         if (poSQLiteDS->HasSpatialite4Layout())
         {
-            int nGeomType = poLayer->GetGeomType();
+            const auto eGeomType = poLayer->GetGeomType();
+            int nGeomType = eGeomType;
             int nCoordDimension = 2;
-            if (wkbHasZ((OGRwkbGeometryType)nGeomType))
+            if (wkbHasZ(eGeomType))
             {
                 nGeomType += 1000;
                 nCoordDimension = 3;
@@ -742,7 +749,8 @@ static int OGR2SQLITEDealWithSpatialColumn(
         if (poGeom != nullptr && !poGeom->IsEmpty())
         {
             poGeom->getEnvelope(&sEnvelope);
-            sqlite3_bind_int64(hStmt, 1, (sqlite3_int64)poFeature->GetFID());
+            sqlite3_bind_int64(hStmt, 1,
+                               static_cast<sqlite3_int64>(poFeature->GetFID()));
             sqlite3_bind_double(hStmt, 2, sEnvelope.MinX);
             sqlite3_bind_double(hStmt, 3, sEnvelope.MaxX);
             sqlite3_bind_double(hStmt, 4, sEnvelope.MinY);
@@ -781,7 +789,8 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
                               OGRGeometry *poSpatialFilter,
                               CPL_UNUSED const char *pszDialect)
 {
-    while (*pszStatement != '\0' && isspace(*pszStatement))
+    while (*pszStatement != '\0' &&
+           isspace(static_cast<unsigned char>(*pszStatement)))
         pszStatement++;
 
     if (STARTS_WITH_CI(pszStatement, "ALTER TABLE ") ||
@@ -825,10 +834,8 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
         }
     }
 
-    char *pszTmpDBName = (char *)CPLMalloc(256);
-    char szPtr[32];
-    snprintf(szPtr, sizeof(szPtr), "%p", pszTmpDBName);
-    snprintf(pszTmpDBName, 256, "/vsimem/ogr2sqlite/temp_%s.db", szPtr);
+    char *pszTmpDBName = static_cast<char *>(CPLMalloc(256));
+    snprintf(pszTmpDBName, 256, "%s", VSIMemGenerateHiddenFilename("temp.db"));
 
     OGRSQLiteDataSource *poSQLiteDS = nullptr;
     bool bSpatialiteDB = false;
@@ -855,10 +862,9 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
                            "OGR_SQLITE_DIALECT_USE_SPATIALITE", "YES")))
         {
             bTried = true;
-            char *pszCachedFilename = (char *)CPLMalloc(256);
-            snprintf(szPtr, sizeof(szPtr), "%p", pszCachedFilename);
-            snprintf(pszCachedFilename, 256,
-                     "/vsimem/ogr2sqlite/reference_%s.db", szPtr);
+            char *pszCachedFilename = static_cast<char *>(CPLMalloc(256));
+            snprintf(pszCachedFilename, 256, "%s",
+                     VSIMemGenerateHiddenFilename("reference.db"));
             char **papszOptions = CSLAddString(nullptr, "SPATIALITE=YES");
             OGRSQLiteDataSource *poCachedDS = new OGRSQLiteDataSource();
             const int nRet =
@@ -886,7 +892,8 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
         CPLTestBool(
             CPLGetConfigOption("OGR_SQLITE_DIALECT_USE_SPATIALITE", "YES")))
     {
-        GByte *pabyEmptyDBClone = (GByte *)VSI_MALLOC_VERBOSE(nEmptyDBSize);
+        GByte *pabyEmptyDBClone =
+            static_cast<GByte *>(VSI_MALLOC_VERBOSE(nEmptyDBSize));
         if (pabyEmptyDBClone == nullptr)
         {
             CPLFree(pszTmpDBName);
@@ -985,6 +992,7 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
     /*      For each of those tables, create a Virtual Table.               */
     /* -------------------------------------------------------------------- */
     OGRLayer *poSingleSrcLayer = nullptr;
+    bool bStringsAsUTF8 = true;
     for (; oIter != oSetLayers.end(); ++oIter)
     {
         const LayerDesc &oLayerDesc = *oIter;
@@ -1009,8 +1017,9 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
         }
         else
         {
-            OGRDataSource *poOtherDS =
-                (OGRDataSource *)OGROpen(oLayerDesc.osDSName, FALSE, nullptr);
+            auto poOtherDS = std::unique_ptr<GDALDataset>(
+                GDALDataset::Open(oLayerDesc.osDSName, GDAL_OF_VECTOR, nullptr,
+                                  nullptr, nullptr));
             if (poOtherDS == nullptr)
             {
                 CPLError(CE_Failure, CPLE_AppDefined,
@@ -1029,7 +1038,6 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
                          "Cannot find layer '%s' in '%s'",
                          oLayerDesc.osLayerName.c_str(),
                          oLayerDesc.osDSName.c_str());
-                delete poOtherDS;
                 delete poSQLiteDS;
                 VSIUnlink(pszTmpDBName);
                 CPLFree(pszTmpDBName);
@@ -1038,8 +1046,11 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
 
             osTableName = oLayerDesc.osSubstitutedName;
 
-            nExtraDS = OGR2SQLITE_AddExtraDS(poModule, poOtherDS);
+            nExtraDS = OGR2SQLITE_AddExtraDS(poModule, poOtherDS.release());
         }
+
+        if (!poLayer->TestCapability(OLCStringsAsUTF8))
+            bStringsAsUTF8 = false;
 
         if (oSetLayers.size() == 1)
             poSingleSrcLayer = poLayer;
@@ -1147,13 +1158,24 @@ OGRLayer *OGRSQLiteExecuteSQL(GDALDataset *poDS, const char *pszStatement,
 
     auto poDrv = poDS->GetDriver();
     const bool bCanReopenBaseDS =
-        !(poDrv && EQUAL(poDrv->GetDescription(), "Memory"));
+        !(poDrv && (EQUAL(poDrv->GetDescription(), "MEM") ||
+                    EQUAL(poDrv->GetDescription(), "Memory")));
     OGRSQLiteSelectLayer *poLayer = new OGRSQLiteExecuteSQLLayer(
         pszTmpDBName, poSQLiteDS, pszStatement, hSQLStmt,
-        bUseStatementForGetNextFeature, bEmptyLayer, bCanReopenBaseDS);
+        bUseStatementForGetNextFeature, bEmptyLayer, bCanReopenBaseDS,
+        bStringsAsUTF8);
 
     if (poSpatialFilter != nullptr)
+    {
+        const auto nErrorCounter = CPLGetErrorCounter();
         poLayer->SetSpatialFilter(0, poSpatialFilter);
+        if (CPLGetErrorCounter() > nErrorCounter &&
+            CPLGetLastErrorType() != CE_None)
+        {
+            delete poLayer;
+            return nullptr;
+        }
+    }
 
     if (poSingleSrcLayer != nullptr)
         poLayer->SetMetadata(poSingleSrcLayer->GetMetadata("NATIVE_DATA"),

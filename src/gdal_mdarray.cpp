@@ -108,7 +108,7 @@ Local<Value> MDArray::New(std::shared_ptr<GDALMDArray> raw, GDALDataset *parent_
 
   // add reference to datasource so datasource doesnt get GC'ed while group is
   // alive
-  Local<Object> ds, group;
+  Local<Object> ds;
   if (object_store.has(parent_ds)) {
     ds = object_store.get(parent_ds);
   } else {
@@ -143,7 +143,7 @@ NAN_METHOD(MDArray::toString) {
 
 /* Find the lowest possible element index for the given spans and strides */
 static inline int
-findLowest(int dimensions, std::shared_ptr<size_t> span, std::shared_ptr<GPtrDiff_t> stride, GPtrDiff_t offset) {
+findLowest(int dimensions, std::shared_ptr<size_t[]> span, std::shared_ptr<GPtrDiff_t[]> stride, GPtrDiff_t offset) {
   GPtrDiff_t dimStride = 1;
   GPtrDiff_t lowest = 0;
   for (int dim = 0; dim < dimensions; dim++) {
@@ -170,7 +170,7 @@ findLowest(int dimensions, std::shared_ptr<size_t> span, std::shared_ptr<GPtrDif
 
 /* Find the highest possible element index for the given spans and strides */
 static inline int
-findHighest(int dimensions, std::shared_ptr<size_t> span, std::shared_ptr<GPtrDiff_t> stride, GPtrDiff_t offset) {
+findHighest(int dimensions, std::shared_ptr<size_t[]> span, std::shared_ptr<GPtrDiff_t[]> stride, GPtrDiff_t offset) {
   GPtrDiff_t dimStride = 1;
   GPtrDiff_t highest = 0;
   for (int dim = 0; dim < dimensions; dim++) {
@@ -196,12 +196,12 @@ findHighest(int dimensions, std::shared_ptr<size_t> span, std::shared_ptr<GPtrDi
 }
 
 /**
- * @typedef {object} MDArrayOptions
+ * @typedef {object} MDArrayOptions<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @property {number[]} origin
  * @property {number[]} span
  * @property {number[]} [stride]
  * @property {string} [data_type]
- * @property {TypedArray} [data]
+ * @property {T} [data]
  * @property {number} [_offset]
  */
 
@@ -214,17 +214,17 @@ findHighest(int dimensions, std::shared_ptr<size_t> span, std::shared_ptr<GPtrDi
  *
  * Although this method can be used in its raw form, it works best when used with the ndarray plugin.
  *
- * @method read
+ * @method read<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof MDArray
  * @throws {Error}
- * @param {MDArrayOptions} options
+ * @param {MDArrayOptions<T>} options
  * @param {number[]} options.origin An array of the starting indices
  * @param {number[]} options.span An array specifying the number of elements to read in each dimension
  * @param {number[]} [options.stride] An array of strides for the output array, mandatory if the array is specified
  * @param {string} [options.data_type] See {@link GDT|GDT constants}
- * @param {TypedArray} [options.data] The `TypedArray` to put the data in. A new array is created if not given.
- * @return {TypedArray}
+ * @param {T} [options.data] The `TypedArray` to put the data in. A new array is created if not given.
+ * @return {T}
  */
 
 /**
@@ -237,19 +237,19 @@ findHighest(int dimensions, std::shared_ptr<size_t> span, std::shared_ptr<GPtrDi
  *
  * Although this method can be used in its raw form, it works best when used with the ndarray plugin.
  *
- * @method readAsync
+ * @method readAsync<T extends TypedArray<number> | TypedArray<bigint> = TypedArray<number>>
  * @instance
  * @memberof MDArray
  * @throws {Error}
- * @param {MDArrayOptions} options
+ * @param {MDArrayOptions<T>} options
  * @param {number[]} options.origin An array of the starting indices
  * @param {number[]} options.span An array specifying the number of elements to read in each dimension
  * @param {number[]} [options.stride] An array of strides for the output array, mandatory if the array is specified
  * @param {string} [options.data_type] See {@link GDT|GDT constants}
- * @param {TypedArray} [options.data] The `TypedArray` to put the data in. A new array is created if not given.
+ * @param {T} [options.data] The `TypedArray` to put the data in. A new array is created if not given.
  * @param {ProgressCb} [options.progress_cb]
- * @param {callback<TypedArray>} [callback=undefined]
- * @return {Promise<TypedArray>} A `TypedArray` of values.
+ * @param {callback<T>} [callback=undefined]
+ * @return {Promise<T>} A `TypedArray` of values.
  */
 GDAL_ASYNCABLE_DEFINE(MDArray::read) {
 
@@ -269,9 +269,9 @@ GDAL_ASYNCABLE_DEFINE(MDArray::read) {
   NODE_INT64_FROM_OBJ_OPT(options, "_offset", offset);
   if (!type_name.empty()) { type = GDALGetDataTypeByName(type_name.c_str()); }
 
-  std::shared_ptr<GUInt64> gdal_origin;
-  std::shared_ptr<size_t> gdal_span;
-  std::shared_ptr<GPtrDiff_t> gdal_stride;
+  std::shared_ptr<GUInt64[]> gdal_origin;
+  std::shared_ptr<size_t[]> gdal_span;
+  std::shared_ptr<GPtrDiff_t[]> gdal_stride;
   try {
     gdal_origin = NumberArrayToSharedPtr<int64_t, GUInt64>(origin, self->dimensions);
     gdal_span = NumberArrayToSharedPtr<int64_t, size_t>(span, self->dimensions);
@@ -335,7 +335,8 @@ GDAL_ASYNCABLE_DEFINE(MDArray::read) {
 
   job.main =
     [buffer, gdal_mdarray, gdal_origin, gdal_span, gdal_stride, type, length, offset](const GDALExecutionProgress &) {
-      int bytes_per_pixel = GDALGetDataTypeSize(type) / 8;
+      int bytes_per_pixel = GDALGetDataTypeSizeBytes(type);
+      if (bytes_per_pixel == 0) { throw "Invalid GDAL data type"; }
       CPLErrorReset();
       GDALExtendedDataType gdal_type = GDALExtendedDataType::Create(type);
       bool success = gdal_mdarray->Read(
@@ -454,7 +455,7 @@ NAN_METHOD(MDArray::asDataset) {
  * @name srs
  * @instance
  * @memberof MDArray
- * @type {SpatialReference}
+ * @type {SpatialReference|null}
  */
 NAN_GETTER(MDArray::srsGetter) {
   NODE_UNWRAP_CHECK(MDArray, info.This(), array);

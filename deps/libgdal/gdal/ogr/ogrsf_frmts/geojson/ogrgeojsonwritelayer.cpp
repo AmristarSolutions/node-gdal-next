@@ -8,23 +8,7 @@
  * Copyright (c) 2011, Even Rouault <even dot rouault at spatialys.com>
  * Copyright (c) 2007, Mateusz Loskot
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * SPDX-License-Identifier: MIT
  ****************************************************************************/
 
 #include "ogr_geojson.h"
@@ -40,7 +24,7 @@
 
 OGRGeoJSONWriteLayer::OGRGeoJSONWriteLayer(const char *pszName,
                                            OGRwkbGeometryType eGType,
-                                           char **papszOptions,
+                                           CSLConstList papszOptions,
                                            bool bWriteFC_BBOXIn,
                                            OGRCoordinateTransformation *poCT,
                                            OGRGeoJSONDataSource *poDS)
@@ -48,23 +32,42 @@ OGRGeoJSONWriteLayer::OGRGeoJSONWriteLayer(const char *pszName,
       bWriteBBOX(CPLTestBool(
           CSLFetchNameValueDef(papszOptions, "WRITE_BBOX", "FALSE"))),
       bBBOX3D(false), bWriteFC_BBOX(bWriteFC_BBOXIn),
-      nCoordPrecision_(atoi(
-          CSLFetchNameValueDef(papszOptions, "COORDINATE_PRECISION", "-1"))),
       nSignificantFigures_(atoi(
           CSLFetchNameValueDef(papszOptions, "SIGNIFICANT_FIGURES", "-1"))),
       bRFC7946_(
           CPLTestBool(CSLFetchNameValueDef(papszOptions, "RFC7946", "FALSE"))),
       bWrapDateLine_(CPLTestBool(
           CSLFetchNameValueDef(papszOptions, "WRAPDATELINE", "YES"))),
+      osForeignMembers_(
+          CSLFetchNameValueDef(papszOptions, "FOREIGN_MEMBERS_FEATURE", "")),
       poCT_(poCT)
 {
+    if (!osForeignMembers_.empty())
+    {
+        // Already checked in OGRGeoJSONDataSource::ICreateLayer()
+        CPLAssert(osForeignMembers_.front() == '{');
+        CPLAssert(osForeignMembers_.back() == '}');
+        osForeignMembers_ =
+            osForeignMembers_.substr(1, osForeignMembers_.size() - 2);
+    }
     poFeatureDefn_->Reference();
     poFeatureDefn_->SetGeomType(eGType);
     SetDescription(poFeatureDefn_->GetName());
-    if (bRFC7946_ && nCoordPrecision_ < 0)
-        nCoordPrecision_ = 7;
+    const char *pszCoordPrecision =
+        CSLFetchNameValue(papszOptions, "COORDINATE_PRECISION");
+    if (pszCoordPrecision)
+    {
+        oWriteOptions_.nXYCoordPrecision = atoi(pszCoordPrecision);
+        oWriteOptions_.nZCoordPrecision = atoi(pszCoordPrecision);
+    }
+    else
+    {
+        oWriteOptions_.nXYCoordPrecision = atoi(CSLFetchNameValueDef(
+            papszOptions, "XY_COORD_PRECISION", bRFC7946_ ? "7" : "-1"));
+        oWriteOptions_.nZCoordPrecision = atoi(CSLFetchNameValueDef(
+            papszOptions, "Z_COORD_PRECISION", bRFC7946_ ? "3" : "-1"));
+    }
     oWriteOptions_.bWriteBBOX = bWriteBBOX;
-    oWriteOptions_.nCoordPrecision = nCoordPrecision_;
     oWriteOptions_.nSignificantFigures = nSignificantFigures_;
     if (bRFC7946_)
     {
@@ -75,19 +78,6 @@ OGRGeoJSONWriteLayer::OGRGeoJSONWriteLayer(const char *pszName,
         CSLFetchNameValueDef(papszOptions, "WRITE_NON_FINITE_VALUES", "FALSE"));
     oWriteOptions_.bAutodetectJsonStrings = CPLTestBool(
         CSLFetchNameValueDef(papszOptions, "AUTODETECT_JSON_STRINGS", "TRUE"));
-
-    {
-        CPLErrorStateBackuper oErrorStateBackuper;
-        CPLErrorHandlerPusher oErrorHandler(CPLQuietErrorHandler);
-        OGRGeometry *poInputGeom = nullptr;
-        OGRGeometryFactory::createFromWkt("POLYGON((0 0,1 1,1 0,0 1,0 0))",
-                                          nullptr, &poInputGeom);
-        CPLAssert(poInputGeom);
-        OGRGeometry *poValidGeom = poInputGeom->MakeValid();
-        delete poInputGeom;
-        bHasMakeValid_ = poValidGeom != nullptr;
-        delete poValidGeom;
-    }
 }
 
 /************************************************************************/
@@ -124,9 +114,9 @@ void OGRGeoJSONWriteLayer::FinishWriting()
         {
             CPLString osBBOX = "[ ";
             char szFormat[32];
-            if (nCoordPrecision_ >= 0)
+            if (oWriteOptions_.nXYCoordPrecision >= 0)
                 snprintf(szFormat, sizeof(szFormat), "%%.%df",
-                         nCoordPrecision_);
+                         oWriteOptions_.nXYCoordPrecision);
             else
                 snprintf(szFormat, sizeof(szFormat), "%s", "%.15g");
 
@@ -237,41 +227,58 @@ OGRErr OGRGeoJSONWriteLayer::ICreateFeature(OGRFeature *poFeature)
 
     // Special processing to detect and repair invalid geometries due to
     // coordinate precision.
+    // Normally drivers shouldn't do that as similar code is triggered by
+    // setting the OGR_APPLY_GEOM_SET_PRECISION=YES configuration option by
+    // the generic OGRLayer::CreateFeature() code path. But this code predates
+    // its introduction and RFC99, and can be useful in RFC7946 mode due to
+    // coordinate reprojection.
     OGRGeometry *poOrigGeom = poFeature->GetGeometryRef();
-    if (bHasMakeValid_ && nCoordPrecision_ >= 0 && poOrigGeom &&
+    if (OGRGeometryFactory::haveGEOS() &&
+        oWriteOptions_.nXYCoordPrecision >= 0 && poOrigGeom &&
         wkbFlatten(poOrigGeom->getGeometryType()) != wkbPoint &&
         IsValid(poOrigGeom))
     {
-        struct CoordinateRoundingVisitor : public OGRDefaultGeometryVisitor
+        const double dfXYResolution =
+            std::pow(10.0, double(-oWriteOptions_.nXYCoordPrecision));
+        auto poNewGeom = std::unique_ptr<OGRGeometry>(
+            poFeatureToWrite->GetGeometryRef()->clone());
+        OGRGeomCoordinatePrecision sPrecision;
+        sPrecision.dfXYResolution = dfXYResolution;
+        poNewGeom->roundCoordinates(sPrecision);
+        if (!IsValid(poNewGeom.get()))
         {
-            const double dfFactor_;
-            const double dfInvFactor_;
-
-            explicit CoordinateRoundingVisitor(int nCoordPrecision)
-                : dfFactor_(std::pow(10.0, double(nCoordPrecision))),
-                  dfInvFactor_(std::pow(10.0, double(-nCoordPrecision)))
+            std::unique_ptr<OGRGeometry> poValidGeom;
+            if (poFeature == poFeatureToWrite)
             {
+                CPLDebug("GeoJSON",
+                         "Running SetPrecision() to correct an invalid "
+                         "geometry due to reduced precision output");
+                poValidGeom.reset(
+                    poOrigGeom->SetPrecision(dfXYResolution, /* nFlags = */ 0));
             }
-
-            using OGRDefaultGeometryVisitor::visit;
-            void visit(OGRPoint *p) override
+            else
             {
-                p->setX(std::round(p->getX() * dfFactor_) * dfInvFactor_);
-                p->setY(std::round(p->getY() * dfFactor_) * dfInvFactor_);
+                CPLDebug("GeoJSON", "Running MakeValid() to correct an invalid "
+                                    "geometry due to reduced precision output");
+                poValidGeom.reset(poNewGeom->MakeValid());
+                if (poValidGeom)
+                {
+                    auto poValidGeomRoundCoordinates =
+                        std::unique_ptr<OGRGeometry>(poValidGeom->clone());
+                    poValidGeomRoundCoordinates->roundCoordinates(sPrecision);
+                    if (!IsValid(poValidGeomRoundCoordinates.get()))
+                    {
+                        CPLDebug("GeoJSON",
+                                 "Running SetPrecision() to correct an invalid "
+                                 "geometry due to reduced precision output");
+                        auto poValidGeom2 = std::unique_ptr<OGRGeometry>(
+                            poValidGeom->SetPrecision(dfXYResolution,
+                                                      /* nFlags = */ 0));
+                        if (poValidGeom2)
+                            poValidGeom = std::move(poValidGeom2);
+                    }
+                }
             }
-        };
-
-        CoordinateRoundingVisitor oVisitor(nCoordPrecision_);
-        auto poNewGeom = poFeature == poFeatureToWrite
-                             ? poOrigGeom->clone()
-                             : poFeatureToWrite->GetGeometryRef();
-        bool bDeleteNewGeom = (poFeature == poFeatureToWrite);
-        poNewGeom->accept(&oVisitor);
-        if (!IsValid(poNewGeom))
-        {
-            CPLDebug("GeoJSON", "Running MakeValid() to correct an invalid "
-                                "geometry due to reduced precision output");
-            auto poValidGeom = poNewGeom->MakeValid();
             if (poValidGeom)
             {
                 if (poFeature == poFeatureToWrite)
@@ -280,31 +287,9 @@ OGRErr OGRGeoJSONWriteLayer::ICreateFeature(OGRFeature *poFeature)
                     poFeatureToWrite->SetFrom(poFeature);
                     poFeatureToWrite->SetFID(poFeature->GetFID());
                 }
-
-                // It may happen that after MakeValid(), and rounding again,
-                // we end up with an invalid result. Run MakeValid() again...
-                poValidGeom->accept(&oVisitor);
-                if (!IsValid(poValidGeom))
-                {
-                    auto poValidGeom2 = poValidGeom->MakeValid();
-                    if (poValidGeom2)
-                    {
-                        delete poValidGeom;
-                        poValidGeom = poValidGeom2;
-                        if (!IsValid(poValidGeom))
-                        {
-                            // hopefully should not happen
-                            CPLDebug("GeoJSON",
-                                     "... still not valid! Giving up");
-                        }
-                    }
-                }
-
-                poFeatureToWrite->SetGeometryDirectly(poValidGeom);
+                poFeatureToWrite->SetGeometryDirectly(poValidGeom.release());
             }
         }
-        if (bDeleteNewGeom)
-            delete poNewGeom;
     }
 
     if (oWriteOptions_.bGenerateID && poFeatureToWrite->GetFID() == OGRNullFID)
@@ -335,7 +320,32 @@ OGRErr OGRGeoJSONWriteLayer::ICreateFeature(OGRFeature *poFeature)
     );
 
     OGRErr eErr = OGRERR_NONE;
-    if (VSIFWriteL(pszJson, strlen(pszJson), 1, fp) != 1)
+    size_t nLen = strlen(pszJson);
+    if (!osForeignMembers_.empty())
+    {
+        if (nLen > 2 && pszJson[nLen - 2] == ' ' && pszJson[nLen - 1] == '}')
+        {
+            nLen -= 2;
+        }
+        else
+        {
+            // should not happen
+            CPLError(CE_Failure, CPLE_AppDefined,
+                     "Unexpected JSON output for feature. Cannot write foreign "
+                     "member");
+            osForeignMembers_.clear();
+        }
+    }
+    if (VSIFWriteL(pszJson, nLen, 1, fp) != 1)
+    {
+        CPLError(CE_Failure, CPLE_FileIO, "Cannot write feature");
+        eErr = OGRERR_FAILURE;
+    }
+    else if (!osForeignMembers_.empty() &&
+             (VSIFWriteL(", ", 2, 1, fp) != 1 ||
+              VSIFWriteL(osForeignMembers_.c_str(), osForeignMembers_.size(), 1,
+                         fp) != 1 ||
+              VSIFWriteL("}", 1, 1, fp) != 1))
     {
         CPLError(CE_Failure, CPLE_FileIO, "Cannot write feature");
         eErr = OGRERR_FAILURE;
@@ -436,7 +446,7 @@ OGRErr OGRGeoJSONWriteLayer::ICreateFeature(OGRFeature *poFeature)
 /*                           CreateField()                              */
 /************************************************************************/
 
-OGRErr OGRGeoJSONWriteLayer::CreateField(OGRFieldDefn *poField,
+OGRErr OGRGeoJSONWriteLayer::CreateField(const OGRFieldDefn *poField,
                                          int /* bApproxOK */)
 {
     if (poFeatureDefn_->GetFieldIndexCaseSensitive(poField->GetNameRef()) >= 0)
@@ -457,7 +467,7 @@ OGRErr OGRGeoJSONWriteLayer::CreateField(OGRFieldDefn *poField,
 /*                           TestCapability()                           */
 /************************************************************************/
 
-int OGRGeoJSONWriteLayer::TestCapability(const char *pszCap)
+int OGRGeoJSONWriteLayer::TestCapability(const char *pszCap) const
 {
     if (EQUAL(pszCap, OLCCreateField))
         return TRUE;
@@ -469,10 +479,11 @@ int OGRGeoJSONWriteLayer::TestCapability(const char *pszCap)
 }
 
 /************************************************************************/
-/*                            GetExtent()                               */
+/*                           IGetExtent()                               */
 /************************************************************************/
 
-OGRErr OGRGeoJSONWriteLayer::GetExtent(OGREnvelope *psExtent, int)
+OGRErr OGRGeoJSONWriteLayer::IGetExtent(int /*iGeomField*/,
+                                        OGREnvelope *psExtent, bool)
 {
     if (sEnvelopeLayer.IsInit())
     {
@@ -480,4 +491,13 @@ OGRErr OGRGeoJSONWriteLayer::GetExtent(OGREnvelope *psExtent, int)
         return OGRERR_NONE;
     }
     return OGRERR_FAILURE;
+}
+
+/************************************************************************/
+/*                             GetDataset()                             */
+/************************************************************************/
+
+GDALDataset *OGRGeoJSONWriteLayer::GetDataset()
+{
+    return poDS_;
 }
